@@ -1,7 +1,7 @@
 ﻿import torch
 
 from isaaclab.utils import configclass
-from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.utils.math import quat_from_matrix, subtract_frame_transforms
 
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -22,11 +22,8 @@ from logic import (
     reset_planning_obstacle_pose,
     AuboRewardFns,
     AuboTerminationFns,
-    ee_pos_w,
-    ee_to_target,
-    ee_lin_vel_w,
-    target_pos_w,
 )
+from tool import AuboToolFns
 from asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
 
 import isaaclab.envs.mdp as mdp
@@ -147,7 +144,7 @@ class StateOnlyObsCfg(ObsGroup):
 
     # 2. 末端状态
     ee_pos = ObsTerm(
-        func=ee_pos_w,
+        func=AuboToolFns.get_body_pos_w,
         params={
             "asset_cfg": SceneEntityCfg(ROBOT_ASSET_NAME),
             "body_name": EE_BODY_NAME,   
@@ -155,7 +152,7 @@ class StateOnlyObsCfg(ObsGroup):
     )
 
     ee_lin_vel = ObsTerm(
-        func=ee_lin_vel_w,
+        func=AuboToolFns.get_body_lin_vel_w,
         params={
             "asset_cfg": SceneEntityCfg(ROBOT_ASSET_NAME),
             "body_name": EE_BODY_NAME,   
@@ -164,16 +161,16 @@ class StateOnlyObsCfg(ObsGroup):
 
     # 3. 任务状态
     target_pos = ObsTerm(
-        func=target_pos_w,
+        func=AuboToolFns.get_root_pos_w,
         params={"asset_cfg": SceneEntityCfg(TARGET_ASSET_NAME)},
     )
 
     to_target = ObsTerm(
-        func=ee_to_target,
+        func=AuboToolFns.ee_to_target_vec_w,
         params={
-            "robot_cfg": SceneEntityCfg(ROBOT_ASSET_NAME),
+            "robot_asset_cfg": SceneEntityCfg(ROBOT_ASSET_NAME),
             "ee_body_name": EE_BODY_NAME,   
-            "target_cfg": SceneEntityCfg(TARGET_ASSET_NAME),
+            "target_asset_cfg": SceneEntityCfg(TARGET_ASSET_NAME),
         },
     )
 
@@ -194,8 +191,8 @@ class ObservationsCfg:
 
 # 动作项逻辑
 class AuboTaskSpaceIKAction(ActionTerm):
-    """将7维任务空间动作映射为关节位置目标:
-    action = [dx, dy, dz, qx, qy, qz, qw]
+    """将3维任务空间位移动作映射为关节位置目标，姿态自动朝向目标点。
+    action = [dx, dy, dz]
     """
 
     cfg: "AuboTaskSpaceIKActionCfg"
@@ -251,10 +248,43 @@ class AuboTaskSpaceIKAction(ActionTerm):
         self._processed_actions[:, 2] *= self.cfg.pos_scale[2]
 
         # 归一化四元数
-        if self.cfg.normalize_quat:
-            quat = self._processed_actions[:, 3:7]
-            quat = quat / torch.clamp(torch.norm(quat, dim=-1, keepdim=True), min=1e-8)
-            self._processed_actions[:, 3:7] = quat
+        # if self.cfg.normalize_quat:
+        #     quat = self._processed_actions[:, 3:7]
+        #     quat = quat / torch.clamp(torch.norm(quat, dim=-1, keepdim=True), min=1e-8)
+        #     self._processed_actions[:, 3:7] = quat
+
+    def compute_target_facing_quat_b(
+        self,
+        ee_target_pos_b: torch.Tensor,
+        goal_pos_b: torch.Tensor,
+    ) -> torch.Tensor:
+        """根据“目标末端位置->目标点”方向生成朝向四元数 (w, x, y, z)."""
+        eps = 1e-6
+        device = ee_target_pos_b.device
+        dtype = ee_target_pos_b.dtype
+
+        forward = goal_pos_b - ee_target_pos_b
+        forward_norm = torch.norm(forward, dim=-1, keepdim=True)
+        default_forward = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype).view(1, 3)
+        forward = torch.where(forward_norm > eps, forward / torch.clamp(forward_norm, min=eps), default_forward)
+
+        world_up = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 3).repeat(forward.shape[0], 1)
+        alt_up = torch.tensor([0.0, 1.0, 0.0], device=device, dtype=dtype).view(1, 3).repeat(forward.shape[0], 1)
+        near_parallel = torch.abs((forward * world_up).sum(dim=-1, keepdim=True)) > 0.999
+        up = torch.where(near_parallel, alt_up, world_up)
+
+        y_axis = torch.cross(up, forward, dim=-1)
+        y_axis = y_axis / torch.clamp(torch.norm(y_axis, dim=-1, keepdim=True), min=eps)
+
+        z_axis = torch.cross(forward, y_axis, dim=-1)
+        z_axis = z_axis / torch.clamp(torch.norm(z_axis, dim=-1, keepdim=True), min=eps)
+
+        rot_mats = torch.stack([forward, y_axis, z_axis], dim=-1)
+        target_quat_b = quat_from_matrix(rot_mats)
+
+        # 统一符号，减小跨步抖动
+        sign = torch.where(target_quat_b[:, :1] < 0.0, -1.0, 1.0)
+        return target_quat_b * sign
 
     def apply_actions(self):
         """执行IK并写入关节目标."""
@@ -273,9 +303,18 @@ class AuboTaskSpaceIKAction(ActionTerm):
         # 当前末端位置 + 位移增量
         target_pos_b = ee_pos_b + self._processed_actions[:, 0:3]
 
-        # 这里直接把动作后4维解释为目标姿态四元数
-        # 若你以后想改成“增量四元数”，就在这里与当前 ee_quat_b 做组合
-        target_quat_b = self._processed_actions[:, 3:7]
+        target_asset = self._env.scene[TARGET_ASSET_NAME]
+        goal_pos_w = target_asset.data.root_pos_w[:, :3]
+        identity_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=goal_pos_w.dtype)
+        identity_quat_w[:, 0] = 1.0
+        goal_pos_b, _ = subtract_frame_transforms(
+            root_pose_w[:, 0:3],
+            root_pose_w[:, 3:7],
+            goal_pos_w,
+            identity_quat_w,
+        )
+
+        target_quat_b = self.compute_target_facing_quat_b(target_pos_b, goal_pos_b)
 
         ik_commands = torch.cat([target_pos_b, target_quat_b], dim=-1)
         self._ik_controller.set_command(ik_commands)
@@ -300,11 +339,11 @@ class AuboTaskSpaceIKActionCfg(ActionTermCfg):
     joint_names: list[str] = ["Joint.*"]
     body_name: str = EE_BODY_NAME
 
-    # 动作维度: [dx, dy, dz, qx, qy, qz, qw]
-    action_dim: int = 7
+    # 暂且更改为三维 dx dy dz
+    action_dim: int = 3
 
     # 位移缩放（米）
-    pos_scale: tuple[float, float, float] = (0.02, 0.02, 0.02)
+    pos_scale: tuple[float, float, float] = (0.05, 0.05, 0.05)
 
     # 是否将后4维归一化为单位四元数
     normalize_quat: bool = True
@@ -325,7 +364,7 @@ class ActionsCfg:
         asset_name=ROBOT_ASSET_NAME,
         joint_names=["Joint.*"],
         body_name=EE_BODY_NAME,
-        pos_scale=(0.02, 0.02, 0.02),
+        pos_scale=(0.05, 0.05, 0.05),
         normalize_quat=True,
     )
 
@@ -401,7 +440,7 @@ class RewardsCfg:
             "robot_asset_name": ROBOT_ASSET_NAME,
             "ee_body_name": EE_BODY_NAME,
             "target_asset_name": TARGET_ASSET_NAME,
-            "threshold": 0.02,
+            "threshold": 0.15,
         },
     )
 
@@ -424,16 +463,17 @@ class RewardsCfg:
     )
 
     # 7) obstacle safety penalty：鼓励绕障留余量，不贴边走
-    obstacle_safe = RewardTerm(
-        func=AuboRewardFns.penalty_ee_obstacle_safe,
-        weight=-150.0,
-        params={
-            "robot_asset_name": ROBOT_ASSET_NAME,
-            "ee_body_name": EE_BODY_NAME,
-            "obstacle_asset_name": TARGET_ASSET_NAME,
-            "safe_margin": 0.08,
-        },
-    )
+    # 暂且没有加入障碍部分
+    # obstacle_safe = RewardTerm(
+    #     func=AuboRewardFns.penalty_ee_obstacle_safe,
+    #     weight=-150.0,
+    #     params={
+    #         "robot_asset_name": ROBOT_ASSET_NAME,
+    #         "ee_body_name": EE_BODY_NAME,
+    #         "obstacle_asset_name": TARGET_ASSET_NAME,
+    #         "safe_margin": 0.08,
+    #     },
+    # )
 
 # 终结配置类
 @configclass
@@ -489,10 +529,10 @@ class AuboRLEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self) -> None:
         """Post initialization."""
         # general settings
-        self.decimation = 6
-        self.episode_length_s = 10
+        self.decimation = 30
+        self.episode_length_s = 20
         # viewer settings
         self.viewer.eye = (8.0, 0.0, 5.0)
         # simulation settings
         self.sim.dt = 1/ 120
-        self.sim.render_interval = 5
+        self.sim.render_interval = 4

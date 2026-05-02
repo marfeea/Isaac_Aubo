@@ -4,6 +4,7 @@ from isaaclab.managers import SceneEntityCfg
 import isaaclab.envs.mdp as mdp
 from typing import Sequence
 from asset import EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
+from tool import AuboToolFns
 
 class AuboEventFns:
     """Aubo 事件相关函数集合."""
@@ -19,8 +20,7 @@ class AuboEventFns:
         if env_ids is None:
             env_ids = torch.arange(env.num_envs, device=env.device)
 
-        target = env.scene[target_asset_name]
-        goal_pos_w = target.data.root_pos_w[:, :3].clone()
+        goal_pos_w = AuboToolFns.get_root_pos_w(env, target_asset_name).clone()
         setattr(env, goal_pos_name, goal_pos_w)
         return goal_pos_w[env_ids]
 
@@ -34,7 +34,7 @@ def reset_planning_obstacle_pose(
     center=(0.0, 0.0, 0.5),  # 椭球中心，相对 env origin
 ):
     device = env.device
-    target = env.scene[asset_cfg.name]
+    target = AuboToolFns.get_asset(env, asset_cfg)
 
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=device)
@@ -106,35 +106,6 @@ class AuboRewardFns:
     """Aubo reaching / obstacle-aware reaching 的奖励函数集合."""
 
     @staticmethod
-    def _get_body_pos_w(env, asset_name: str, body_name: str) -> torch.Tensor:
-        """获取指定刚体世界坐标位置, shape = (num_envs, 3)."""
-        asset = env.scene[asset_name]
-        body_ids = asset.find_bodies(body_name)[0]
-        if isinstance(body_ids, Sequence):
-            body_id = body_ids[0]
-        else:
-            body_id = body_ids
-        return asset.data.body_pose_w[:, body_id, 0:3]
-
-    @staticmethod
-    def _get_root_pos_w(env, asset_name: str) -> torch.Tensor:
-        """获取刚体/目标根坐标世界位置, shape = (num_envs, 3)."""
-        asset = env.scene[asset_name]
-        return asset.data.root_pos_w
-
-    @staticmethod
-    def ee_target_distance(
-        env,
-        robot_asset_name: str = ROBOT_ASSET_NAME,
-        ee_body_name: str = EE_BODY_NAME,
-        target_asset_name: str = TARGET_ASSET_NAME,
-    ) -> torch.Tensor:
-        """末端到目标欧式距离."""
-        ee_pos = AuboRewardFns._get_body_pos_w(env, robot_asset_name, ee_body_name)
-        target_pos = AuboRewardFns._get_root_pos_w(env, target_asset_name)
-        return torch.norm(ee_pos - target_pos, dim=-1)
-
-    @staticmethod
     def reward_ee_distance_exp(
         env,
         robot_asset_name: str = ROBOT_ASSET_NAME,
@@ -143,7 +114,7 @@ class AuboRewardFns:
         std: float = 0.20,
     ) -> torch.Tensor:
         """稠密位置奖励: exp(-d / std)."""
-        dist = AuboRewardFns.ee_target_distance(env, robot_asset_name, ee_body_name, target_asset_name)
+        dist = AuboToolFns.ee_target_distance_w(env, robot_asset_name, ee_body_name, target_asset_name)
         return torch.exp(-dist / std)
 
     @staticmethod
@@ -154,7 +125,7 @@ class AuboRewardFns:
         target_asset_name: str = TARGET_ASSET_NAME,
     ) -> torch.Tensor:
         """progress reward: d_prev - d_curr."""
-        dist = AuboRewardFns.ee_target_distance(env, robot_asset_name, ee_body_name, target_asset_name)
+        dist = AuboToolFns.ee_target_distance_w(env, robot_asset_name, ee_body_name, target_asset_name)
 
         if not hasattr(env, "_prev_ee_target_dist"):
             env._prev_ee_target_dist = dist.clone()
@@ -173,10 +144,17 @@ class AuboRewardFns:
         robot_asset_name: str = ROBOT_ASSET_NAME,
         ee_body_name: str = EE_BODY_NAME,
         target_asset_name: str = TARGET_ASSET_NAME,
-        threshold: float = 0.02,
+        threshold: float = 0.15,
     ) -> torch.Tensor:
         """成功判定项，命中阈值返回1，否则0."""
-        dist = AuboRewardFns.ee_target_distance(env, robot_asset_name, ee_body_name, target_asset_name)
+        dist = AuboToolFns.ee_target_distance_w(env, robot_asset_name, ee_body_name, target_asset_name)
+
+        # 打印日志
+        flags = (dist < threshold)
+        hit_env_ids = torch.nonzero(flags, as_tuple=False).squeeze(-1)
+
+        for env_id in hit_env_ids.detach().cpu().tolist():
+            print(f"[Test] reward compute env{env_id} true")
         return (dist < threshold).float()
 
     @staticmethod
@@ -190,10 +168,7 @@ class AuboRewardFns:
         """末端接近障碍物中心的安全距离惩罚.
         第一版近似项：用末端-障碍中心距离代替真实几何最小距离.
         """
-        ee_pos = AuboRewardFns._get_body_pos_w(env, robot_asset_name, ee_body_name)
-        obs_pos = AuboRewardFns._get_root_pos_w(env, obstacle_asset_name)
-
-        dist = torch.norm(ee_pos - obs_pos, dim=-1)
+        dist = AuboToolFns.ee_target_distance_w(env, robot_asset_name, ee_body_name, obstacle_asset_name)
         return torch.square(torch.clamp(safe_margin - dist, min=0.0))
 
     @staticmethod
@@ -226,39 +201,8 @@ class AuboTerminationFns:
     """Aubo reaching / obstacle-aware reaching 的终止函数集合."""
 
     @staticmethod
-    def _resolve_asset_name(asset_cfg: SceneEntityCfg | str) -> str:
-        if isinstance(asset_cfg, str):
-            return asset_cfg
-        name = getattr(asset_cfg, "name", None)
-        if isinstance(name, str):
-            return name
-        raise TypeError(
-            f"Unsupported asset_cfg type '{type(asset_cfg)}'. "
-            "Expected str or SceneEntityCfg (or object with .name)."
-        )
-
-    @staticmethod
-    def _resolve_goal_pos_w(env, goal_pos_name: str = "goal_pos") -> torch.Tensor:
-        if hasattr(env, goal_pos_name):
-            goal_pos = getattr(env, goal_pos_name)
-            if isinstance(goal_pos, torch.Tensor) and goal_pos.ndim == 2 and goal_pos.shape[-1] >= 3:
-                return goal_pos[:, :3]
-        if goal_pos_name != "goal_pos_w" and hasattr(env, "goal_pos_w"):
-            goal_pos = getattr(env, "goal_pos_w")
-            if isinstance(goal_pos, torch.Tensor) and goal_pos.ndim == 2 and goal_pos.shape[-1] >= 3:
-                return goal_pos[:, :3]
-        return AuboEventFns.goal_pos_w(env, env_ids=None)
-
-    @staticmethod
-    def _get_body_id(asset, body_name: str) -> int:
-        body_ids = asset.find_bodies(body_name)[0]
-        if len(body_ids) == 0:
-            raise ValueError(f"Body '{body_name}' not found in asset '{asset}'.")
-        return int(body_ids[0])
-
-    @staticmethod
     def _get_optional_contact_sensor(env, sensor_cfg: SceneEntityCfg | str):
-        sensor_name = AuboTerminationFns._resolve_asset_name(sensor_cfg)
+        sensor_name = AuboToolFns.resolve_asset_name(sensor_cfg)
         try:
             return env.scene[sensor_name]
         except Exception:
@@ -289,19 +233,21 @@ class AuboTerminationFns:
     def goal_reached(
         env,
         asset_cfg: SceneEntityCfg | str = ROBOT_ASSET_NAME,
-        goal_pos_name: str = "goal_pos",
+        goal_pos_name: str = TARGET_ASSET_NAME,
         ee_frame_name: str = EE_BODY_NAME,
-        pos_threshold: float = 0.03,
+        pos_threshold: float = 0.15,
         required_consecutive_steps: int = 3,
     ) -> torch.Tensor:
         """Terminate when EE stays near goal for consecutive steps."""
-        robot_name = AuboTerminationFns._resolve_asset_name(asset_cfg)
-        robot = env.scene[robot_name]
-        body_id = AuboTerminationFns._get_body_id(robot, ee_frame_name)
+        dist = AuboToolFns.ee_target_distance_w(env, asset_cfg, ee_frame_name, goal_pos_name)
+        reached = dist < pos_threshold
 
-        ee_pos_w = robot.data.body_pose_w[:, body_id, :3]
-        goal_pos_w = AuboTerminationFns._resolve_goal_pos_w(env, goal_pos_name=goal_pos_name)
-        reached = torch.norm(ee_pos_w - goal_pos_w, dim=-1) < pos_threshold
+        # 打印日志
+        flags = reached
+        hit_env_ids = torch.nonzero(flags, as_tuple=False).squeeze(-1)
+        for env_id in hit_env_ids.detach().cpu().tolist():
+            print(f"[Test] terminate env{env_id} true")
+
 
         buf_name = "_goal_reached_consecutive_steps"
         if (not hasattr(env, buf_name)) or (getattr(env, buf_name).shape[0] != env.num_envs):
@@ -315,9 +261,9 @@ class AuboTerminationFns:
         setattr(env, buf_name, counter)
         done = counter >= int(required_consecutive_steps)
 
-        if torch.any(done):
-            print("[Test] success")
-
+        hit_env_ids1 = torch.nonzero(done, as_tuple=False).squeeze(-1)
+        for env_id1 in hit_env_ids1.detach().cpu().tolist():
+            print(f"[Test] terminate env{env_id1} success")
         return done
 
     @staticmethod
@@ -335,12 +281,8 @@ class AuboTerminationFns:
                 "z": [0.05, 1.10],
             }
 
-        robot_name = AuboTerminationFns._resolve_asset_name(asset_cfg)
-        robot = env.scene[robot_name]
-        body_id = AuboTerminationFns._get_body_id(robot, ee_frame_name)
-
         # EE absolute world position
-        ee_pos_w = robot.data.body_pose_w[:, body_id, :3]   # [N, 3]
+        ee_pos_w = AuboToolFns.get_body_pos_w(env, asset_cfg, ee_frame_name)   # [N, 3]
 
         # 每个并行环境自己的 origin
         env_origins = env.scene.env_origins                 # [N, 3]
@@ -357,20 +299,6 @@ class AuboTerminationFns:
         out_z = (ee_pos_e[:, 2] < z_min) | (ee_pos_e[:, 2] > z_max)
 
         done = out_x | out_y | out_z
-
-        # sample_n = min(5, ee_pos_e.shape[0])
-        # print("\n[ee_out_of_workspace] workspace =", workspace)
-        # print("[ee_out_of_workspace] x_min/x_max =", x_min, x_max)
-        # print("[ee_out_of_workspace] y_min/y_max =", y_min, y_max)
-        # print("[ee_out_of_workspace] z_min/z_max =", z_min, z_max)
-        # print("[ee_out_of_workspace] ee_pos_e sample =")
-        # print(ee_pos_e[:sample_n].detach().cpu())
-        # print("[ee_out_of_workspace] out_x sample =", out_x[:sample_n].detach().cpu().tolist())
-        # print("[ee_out_of_workspace] out_y sample =", out_y[:sample_n].detach().cpu().tolist())
-        # print("[ee_out_of_workspace] out_z sample =", out_z[:sample_n].detach().cpu().tolist())
-        # print("[ee_out_of_workspace] out_x sum =", int(out_x.sum().item()),
-        #     "out_y sum =", int(out_y.sum().item()),
-        #     "out_z sum =", int(out_z.sum().item()))
 
         return done
 
@@ -410,53 +338,5 @@ class AuboTerminationFns:
 
     @staticmethod
     def times_out(env) -> torch.Tensor:
-        done = mdp.time_out(env)
-        # if torch.any(done):
-            # print("[Test] timeout at step:", env.episode_length_buf[done].cpu().tolist())
-        return done
-
-def ee_pos_w(env, asset_cfg: SceneEntityCfg, body_name: str) -> torch.Tensor:
-    """返回末端在世界坐标系下的位置，shape = (num_envs, 3)"""
-    robot = env.scene[asset_cfg.name]
-
-    body_ids = robot.find_bodies(body_name)[0]
-    if len(body_ids) == 0:
-        raise ValueError(f"Body name '{body_name}' not found in asset '{asset_cfg.name}'.")
-
-    body_id = body_ids[0]
-    return robot.data.body_pose_w[:, body_id, :3]
-
-def ee_to_target(env,
-                 robot_cfg: SceneEntityCfg,
-                 ee_body_name: str,
-                 target_cfg: SceneEntityCfg) -> torch.Tensor:
-    """返回末端到目标的相对位移，shape = (num_envs, 3)"""
-    robot = env.scene[robot_cfg.name]
-    target = env.scene[target_cfg.name]
-
-    body_ids = robot.find_bodies(ee_body_name)[0]
-    if len(body_ids) == 0:
-        raise ValueError(f"Body name '{ee_body_name}' not found in asset '{robot_cfg.name}'.")
-
-    body_id = body_ids[0]
-    ee_pos = robot.data.body_pose_w[:, body_id, :3]
-    target_pos = target.data.root_pos_w[:, :3]
-
-    return target_pos - ee_pos
-
-def ee_lin_vel_w(env, asset_cfg: SceneEntityCfg, body_name: str) -> torch.Tensor:
-    """末端世界坐标线速度: (num_envs, 3)"""
-    robot = env.scene[asset_cfg.name]
-
-    body_ids = robot.find_bodies(body_name)[0]
-    if len(body_ids) == 0:
-        raise ValueError(f"Body '{body_name}' not found in asset '{asset_cfg.name}'.")
-
-    body_id = body_ids[0]
-    return robot.data.body_lin_vel_w[:, body_id, :3]
-
-def target_pos_w(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """目标世界坐标位置: (num_envs, 3)"""
-    target = env.scene[asset_cfg.name]
-    return target.data.root_pos_w[:, :3]
+        return mdp.time_out(env)
 

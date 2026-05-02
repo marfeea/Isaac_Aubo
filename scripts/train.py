@@ -1,4 +1,4 @@
-# aubo机械臂教师策略训练脚本
+﻿# aubo机械臂教师策略训练脚本
 
 import argparse
 from pathlib import Path
@@ -20,12 +20,44 @@ simulation_app = app_launcher.app
 
 # 3) 必须在 SimulationApp 启动后，再 import 这些
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
 
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper
 
 from RLcfg import AuboRLEnvCfg
+
+
+class EpisodeCurveCallback(BaseCallback):
+    """Log custom episodic curves from IsaacLab extras to TensorBoard."""
+
+    KEY_MAP = {
+        "Episode_Termination/goal_reached": "success_rate",
+        "Episode_Termination/time_out": "timeout_rate",
+        "Episode_Reward/success": "reward_success_mean",
+        "Episode_Reward/ee_progress": "reward_ee_progress_mean",
+        "Episode_Reward/action_rate_l2": "action_rate_l2_mean",
+        "Episode_Reward/step_penalty": "step_penalty_mean",
+    }
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos")
+        if infos is None:
+            return True
+
+        buckets: dict[str, list[float]] = {v: [] for v in self.KEY_MAP.values()}
+        for info in infos:
+            episode_info = info.get("episode")
+            if not isinstance(episode_info, dict):
+                continue
+            for src_key, dst_key in self.KEY_MAP.items():
+                if src_key in episode_info:
+                    buckets[dst_key].append(float(episode_info[src_key]))
+
+        for key, values in buckets.items():
+            if values:
+                self.logger.record(f"custom/{key}", sum(values) / len(values))
+        return True
 
 
 def main():
@@ -41,7 +73,8 @@ def main():
     env = ManagerBasedRLEnv(cfg=env_cfg)
 
     # 3) 最后一步再包 SB3 wrapper
-    env = Sb3VecEnvWrapper(env)
+    # 需要记录 Episode_Reward/* 与 Episode_Termination/* 到 infos，因此关闭 fast_variant。
+    env = Sb3VecEnvWrapper(env, fast_variant=False)
 
     # 4) checkpoint 回调
     log_dir = Path("./logs/sb3_aubo")
@@ -56,6 +89,9 @@ def main():
         save_replay_buffer=False,
         save_vecnormalize=False,
     )
+
+    curve_callback = EpisodeCurveCallback()
+    callbacks = CallbackList([checkpoint_callback, curve_callback])
 
     # 5) PPO
     model = PPO(
@@ -79,7 +115,7 @@ def main():
     # 6) 开始训练
     model.learn(
         total_timesteps=args_cli.total_timesteps,
-        callback=checkpoint_callback,
+        callback=callbacks,
         progress_bar=True,
     )
 
