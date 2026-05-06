@@ -9,5 +9,7 @@ TARGET_ASSET_NAME = "target"
 EE_BODY_NAME = "Flange"
 
 
+
 # Common USD paths.
 AUBO_ROBOT_USD = ASSET_ROOT / "AUBO_E5" / "AUBO_E5.usd"
+ENV_ASSET_USD  = ASSET_ROOT / "Laboratory" / "M_Laboratory.usd"

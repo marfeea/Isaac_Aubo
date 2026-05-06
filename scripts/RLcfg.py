@@ -258,28 +258,40 @@ class AuboTaskSpaceIKAction(ActionTerm):
         ee_target_pos_b: torch.Tensor,
         goal_pos_b: torch.Tensor,
     ) -> torch.Tensor:
-        """根据“目标末端位置->目标点”方向生成朝向四元数 (w, x, y, z)."""
+        """根据“目标末端位置->目标点”方向生成朝向四元数 (w, x, y, z).
+
+        AUBO USD 中 Flange 的局部 +X 轴指向法兰背面，因此这里让局部 -X
+        对准目标点，视觉上才是法兰正面朝向目标。
+        """
         eps = 1e-6
         device = ee_target_pos_b.device
         dtype = ee_target_pos_b.dtype
 
-        forward = goal_pos_b - ee_target_pos_b
-        forward_norm = torch.norm(forward, dim=-1, keepdim=True)
-        default_forward = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype).view(1, 3)
-        forward = torch.where(forward_norm > eps, forward / torch.clamp(forward_norm, min=eps), default_forward)
+        face_dir = goal_pos_b - ee_target_pos_b
+        face_dir_norm = torch.norm(face_dir, dim=-1, keepdim=True)
+        default_face_dir = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype).view(1, 3)
+        face_dir = torch.where(
+            face_dir_norm > eps,
+            face_dir / torch.clamp(face_dir_norm, min=eps),
+            default_face_dir,
+        )
 
-        world_up = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 3).repeat(forward.shape[0], 1)
-        alt_up = torch.tensor([0.0, 1.0, 0.0], device=device, dtype=dtype).view(1, 3).repeat(forward.shape[0], 1)
-        near_parallel = torch.abs((forward * world_up).sum(dim=-1, keepdim=True)) > 0.999
+        # Rotation matrix columns are the target frame axes expressed in base frame.
+        # Since Flange local +X points backward, local +X must point away from target.
+        x_axis = -face_dir
+
+        world_up = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 3).repeat(x_axis.shape[0], 1)
+        alt_up = torch.tensor([0.0, 1.0, 0.0], device=device, dtype=dtype).view(1, 3).repeat(x_axis.shape[0], 1)
+        near_parallel = torch.abs((x_axis * world_up).sum(dim=-1, keepdim=True)) > 0.999
         up = torch.where(near_parallel, alt_up, world_up)
 
-        y_axis = torch.cross(up, forward, dim=-1)
+        y_axis = torch.cross(up, x_axis, dim=-1)
         y_axis = y_axis / torch.clamp(torch.norm(y_axis, dim=-1, keepdim=True), min=eps)
 
-        z_axis = torch.cross(forward, y_axis, dim=-1)
+        z_axis = torch.cross(x_axis, y_axis, dim=-1)
         z_axis = z_axis / torch.clamp(torch.norm(z_axis, dim=-1, keepdim=True), min=eps)
 
-        rot_mats = torch.stack([forward, y_axis, z_axis], dim=-1)
+        rot_mats = torch.stack([x_axis, y_axis, z_axis], dim=-1)
         target_quat_b = quat_from_matrix(rot_mats)
 
         # 统一符号，减小跨步抖动
@@ -407,9 +419,9 @@ class AuboRLSceneCfg(InteractiveSceneCfg):
 # 奖励配置类
 @configclass
 class RewardsCfg:
-    """教师策略第一版奖励配置."""
+    """教师策略奖励配置."""
 
-    # 1) progress reward：鼓励每步真实推进
+    # 1) progress：鼓励末端每步靠近目标。
     ee_progress = RewardTerm(
         func=AuboRewardFns.reward_ee_progress,
         weight=80.0,
@@ -420,7 +432,7 @@ class RewardsCfg:
         },
     )
 
-    # 2) dense distance reward：提供稠密信号，利于前期收敛
+    # 2) dense distance：提供稠密收敛信号。
     ee_distance_exp = RewardTerm(
         func=AuboRewardFns.reward_ee_distance_exp,
         weight=1.0,
@@ -432,7 +444,7 @@ class RewardsCfg:
         },
     )
 
-    # 3) success bonus：定义任务真正完成
+    # 3) success：命中阈值后按动作质量调制奖励。
     success = RewardTerm(
         func=AuboRewardFns.reward_success,
         weight=25.0,
@@ -441,28 +453,57 @@ class RewardsCfg:
             "ee_body_name": EE_BODY_NAME,
             "target_asset_name": TARGET_ASSET_NAME,
             "threshold": 0.15,
+            "progress_ref": 0.015,
+            "action_norm_max": 0.75,
+            "action_norm_std": 0.50,
+            "action_rate_std": 0.75,
+            "w_progress": 0.45,
+            "w_action_mag": 0.30,
+            "w_action_smooth": 0.25,
+            "min_quality_score": 0.35,
         },
     )
 
-    # 4) step penalty：防止拖延和磨时间
-    step_penalty = RewardTerm(
-        func=lambda env: torch.ones(env.num_envs, device=env.device),
-        weight=-0.03,
+    # 4) action_far_near：远区鼓励有效大动作，近区惩罚低效大动作。
+    action_far_near = RewardTerm(
+        func=AuboRewardFns.reward_action_far_near,
+        weight=1.0,
+        params={
+            "robot_asset_name": ROBOT_ASSET_NAME,
+            "ee_body_name": EE_BODY_NAME,
+            "target_asset_name": TARGET_ASSET_NAME,
+            "far_eps": 0.50,
+            "close_eps": 0.20,
+            "w_far_move": 0.10,
+            "w_near_ineff": 1.20,
+            "delta_min_far": 0.020,
+            "delta_min_near": 0.008,
+            "near_action_norm_max": 0.45,
+        },
     )
 
-    # 5) action magnitude penalty：抑制过猛动作
+    # 5) step penalty：防止拖延。
+    step_penalty = RewardTerm(
+        func=AuboRewardFns.penalty_step,
+        weight=-0.03,
+        params={},
+    )
+
+    # 6) action magnitude penalty：抑制过猛动作。
     action_l2 = RewardTerm(
         func=AuboRewardFns.penalty_action_l2,
         weight=-0.02,
+        params={},
     )
 
-    # 6) action rate penalty：抑制高频抖动，更利于后续数据质量
+    # 7) action rate penalty：抑制高频抖动。
     action_rate_l2 = RewardTerm(
         func=AuboRewardFns.penalty_action_rate_l2,
         weight=-0.10,
+        params={},
     )
 
-    # 7) obstacle safety penalty：鼓励绕障留余量，不贴边走
+    # 8) obstacle safety penalty：鼓励绕障留余量，不贴边走
     # 暂且没有加入障碍部分
     # obstacle_safe = RewardTerm(
     #     func=AuboRewardFns.penalty_ee_obstacle_safe,

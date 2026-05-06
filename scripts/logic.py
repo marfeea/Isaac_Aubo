@@ -106,6 +106,20 @@ class AuboRewardFns:
     """Aubo reaching / obstacle-aware reaching 的奖励函数集合."""
 
     @staticmethod
+    def _get_action(env) -> torch.Tensor:
+        """Best-effort access to the current raw policy action."""
+        if hasattr(env, "action_manager") and hasattr(env.action_manager, "action"):
+            return env.action_manager.action
+        return torch.zeros((env.num_envs, 1), device=env.device)
+
+    @staticmethod
+    def _get_action_rate(env, act: torch.Tensor) -> torch.Tensor:
+        """Best-effort action delta; returns zeros when previous action is unavailable."""
+        if hasattr(env, "action_manager") and hasattr(env.action_manager, "prev_action"):
+            return act - env.action_manager.prev_action
+        return torch.zeros_like(act)
+
+    @staticmethod
     def reward_ee_distance_exp(
         env,
         robot_asset_name: str = ROBOT_ASSET_NAME,
@@ -145,17 +159,97 @@ class AuboRewardFns:
         ee_body_name: str = EE_BODY_NAME,
         target_asset_name: str = TARGET_ASSET_NAME,
         threshold: float = 0.15,
+        progress_ref: float = 0.015,
+        action_norm_max: float = 0.75,
+        action_norm_std: float = 0.50,
+        action_rate_std: float = 0.75,
+        w_progress: float = 0.45,
+        w_action_mag: float = 0.30,
+        w_action_smooth: float = 0.25,
+        min_quality_score: float = 0.35,
     ) -> torch.Tensor:
-        """成功判定项，命中阈值返回1，否则0."""
+        """成功奖励: 命中阈值后按末段推进、动作幅值和平滑性调制."""
         dist = AuboToolFns.ee_target_distance_w(env, robot_asset_name, ee_body_name, target_asset_name)
 
-        # 打印日志
-        flags = (dist < threshold)
-        hit_env_ids = torch.nonzero(flags, as_tuple=False).squeeze(-1)
+        buf_name = "_prev_success_quality_dist"
+        if (not hasattr(env, buf_name)) or (getattr(env, buf_name).shape[0] != env.num_envs):
+            setattr(env, buf_name, dist.clone())
+        prev_dist = getattr(env, buf_name)
 
-        for env_id in hit_env_ids.detach().cpu().tolist():
-            print(f"[Test] reward compute env{env_id} true")
-        return (dist < threshold).float()
+        if hasattr(env, "episode_length_buf"):
+            just_reset = env.episode_length_buf == 0
+            prev_dist[just_reset] = dist[just_reset]
+
+        progress = torch.clamp(prev_dist - dist, min=0.0)
+        setattr(env, buf_name, dist.clone())
+
+        act = AuboRewardFns._get_action(env)
+        action_norm = torch.norm(act, dim=-1)
+        action_rate_norm = torch.norm(AuboRewardFns._get_action_rate(env, act), dim=-1)
+
+        progress_score = torch.clamp(progress / max(progress_ref, 1e-6), 0.0, 1.0)
+        action_excess = torch.clamp(action_norm - action_norm_max, min=0.0)
+        action_mag_score = torch.exp(-action_excess / max(action_norm_std, 1e-6))
+        action_smooth_score = torch.exp(-action_rate_norm / max(action_rate_std, 1e-6))
+
+        quality = (
+            w_progress * progress_score
+            + w_action_mag * action_mag_score
+            + w_action_smooth * action_smooth_score
+        )
+        quality = torch.clamp(quality, 0.0, 1.0)
+        quality = min_quality_score + (1.0 - min_quality_score) * quality
+
+        return (dist < threshold).float() * quality
+
+    @staticmethod
+    def reward_action_far_near(
+        env,
+        robot_asset_name: str = ROBOT_ASSET_NAME,
+        ee_body_name: str = EE_BODY_NAME,
+        target_asset_name: str = TARGET_ASSET_NAME,
+        far_eps: float = 0.5,
+        close_eps: float = 0.2,
+        w_far_move: float = 0.10,
+        w_near_ineff: float = 1.2,
+        delta_min_far: float = 0.02,
+        delta_min_near: float = 0.008,
+        near_action_norm_max: float = 0.45,
+    ) -> torch.Tensor:
+        """远近分区动作奖励: 远区奖励有效大动作，近区惩罚低效大动作."""
+        dist = AuboToolFns.ee_target_distance_w(env, robot_asset_name, ee_body_name, target_asset_name)
+
+        buf_name = "_prev_action_far_near_dist"
+        if (not hasattr(env, buf_name)) or (getattr(env, buf_name).shape[0] != env.num_envs):
+            setattr(env, buf_name, dist.clone())
+        prev_dist = getattr(env, buf_name)
+
+        if hasattr(env, "episode_length_buf"):
+            just_reset = env.episode_length_buf == 0
+            prev_dist[just_reset] = dist[just_reset]
+
+        progress = torch.clamp(prev_dist - dist, min=0.0)
+        setattr(env, buf_name, dist.clone())
+
+        act = AuboRewardFns._get_action(env)
+        action_norm = torch.norm(act, dim=-1)
+        max_action_norm = torch.sqrt(torch.tensor(float(act.shape[-1]), device=env.device))
+
+        far_mask = dist > far_eps
+        close_mask = dist < close_eps
+
+        effective_far = torch.clamp(progress / max(delta_min_far, 1e-6), 0.0, 2.0)
+        far_reward = w_far_move * action_norm * effective_far * far_mask.float()
+
+        large_action = torch.clamp(
+            (action_norm - near_action_norm_max) / torch.clamp(max_action_norm - near_action_norm_max, min=1e-6),
+            0.0,
+            1.0,
+        )
+        low_progress = torch.clamp((delta_min_near - progress) / max(delta_min_near, 1e-6), 0.0, 1.0)
+        near_penalty = w_near_ineff * large_action * low_progress * close_mask.float()
+
+        return far_reward - near_penalty
 
     @staticmethod
     def penalty_ee_obstacle_safe(
