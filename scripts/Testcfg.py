@@ -1,32 +1,11 @@
-import torch
-
-from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_from_matrix, subtract_frame_transforms
-
-from isaaclab.managers import ObservationGroupCfg as ObsGroup
-from isaaclab.managers import ObservationTermCfg as ObsTerm
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import RewardTermCfg as RewardTerm
-from isaaclab.managers import TerminationTermCfg as DoneTerm
-
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg, ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.sensors.camera import Camera, CameraCfg
 
 
-from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
-from isaaclab.envs.mdp.actions import ActionTerm, ActionTermCfg
-from logic import (
-    reset_planning_obstacle_pose,
-    AuboRewardFns,
-    AuboTerminationFns,
-)
-from tool import AuboToolFns
-from asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME, ENV_ASSET_USD
+from asset import AUBO_ROBOT_USD, ENV_ASSET_USD
 
-import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 
 
@@ -106,7 +85,7 @@ class TestSceneCfg(InteractiveSceneCfg):
 
     # 背景环境资产：作为静态 USD 场景加载，不注册为可控 articulation。
     my_env = AssetBaseCfg(
-        prim_path="/World/Laboratory",
+        prim_path="{ENV_REGEX_NS}/Laboratory",
         spawn=sim_utils.UsdFileCfg(
             usd_path=str(ENV_ASSET_USD),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -140,3 +119,25 @@ class TestSceneCfg(InteractiveSceneCfg):
 
     # robot
     AUBObot = AUBO_CONFIG.replace(prim_path="{ENV_REGEX_NS}/AUBObot")
+
+    # camera
+    camera_cfg = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/CameraSensor",
+        update_period=0,
+        height=480,
+        width=640,
+        data_types=[
+            "rgb",
+            "distance_to_image_plane",
+            "normals",
+            "semantic_segmentation",
+            "instance_segmentation_fast",
+            "instance_id_segmentation_fast",
+        ],
+        colorize_semantic_segmentation=True,
+        colorize_instance_id_segmentation=True,
+        colorize_instance_segmentation=True,
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
+        ),
+    )

@@ -11,6 +11,7 @@ This script is intentionally lightweight:
 
 import argparse
 import math
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -21,8 +22,13 @@ parser.add_argument("--cycle_steps", type=int, default=240, help="Simulation ste
 parser.add_argument("--print_every", type=int, default=120, help="Print live pose info every N steps. Use 0 to disable.")
 parser.add_argument("--ee_body_name", type=str, default=None, help="End-effector/flange body name to resolve.")
 parser.add_argument("--list_all", action="store_true", help="Print all joint/body names without truncation.")
+parser.add_argument("--camera_name", type=str, default="camera_cfg", help="Scene camera key used for test image capture.")
+parser.add_argument("--picture_dir", type=str, default=None, help="Image output directory. Defaults to <project>/picture.")
+parser.add_argument("--capture_after_seconds", type=float, default=5.0, help="Capture one camera image after this sim time.")
+parser.add_argument("--capture_data_type", type=str, default="rgb", help="Camera data output type to save.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+args_cli.enable_cameras = True
 
 
 app_launcher = AppLauncher(args_cli)
@@ -36,8 +42,12 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
 
 from asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
+from logic import AuboCameraFns
 from RLcfg import AuboRLSceneCfg
 from Testcfg import TestSceneCfg
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _to_list(value) -> list:
@@ -166,6 +176,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
     next_idx = 1
     step_in_cycle = 0
     total_steps = 0
+    capture_done = False
 
     q_start = waypoints[current_idx].clone()
     q_goal = waypoints[next_idx].clone()
@@ -183,6 +194,25 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
         scene.write_data_to_sim()
         sim.step()
         scene.update(sim_dt)
+
+        sim_time = (total_steps + 1) * sim_dt
+        if not capture_done and sim_time >= args_cli.capture_after_seconds:
+            capture_done = True
+            try:
+                image_paths = AuboCameraFns.save_camera_images(
+                    scene=scene,
+                    camera_name=args_cli.camera_name,
+                    output_dir=args_cli.picture_dir,
+                    root_dir=PROJECT_ROOT,
+                    data_type=args_cli.capture_data_type,
+                    env_ids=None,
+                    step=total_steps + 1,
+                )
+                print(f"[INFO] Saved {len(image_paths)} camera images:")
+                for image_path in image_paths:
+                    print(f"  {image_path}")
+            except Exception as exc:
+                print(f"[WARN] Failed to save camera image: {exc}")
 
         if args_cli.print_every > 0 and total_steps % args_cli.print_every == 0:
             ee_body_id = int(entity_cfg.body_ids[0])
@@ -214,10 +244,18 @@ def main() -> None:
     sim = sim_utils.SimulationContext(sim_cfg)
     sim.set_camera_view([2.5, -2.5, 1.8], [0.0, 0.0, 0.45])
 
-    scene_cfg = TestSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.5)
+    # 测试场景设置
+    scene_cfg = TestSceneCfg(num_envs=args_cli.num_envs, env_spacing=25)
     scene = InteractiveScene(scene_cfg)
 
     sim.reset()
+    scene.update(sim.get_physics_dt())
+    AuboCameraFns.set_camera_pose(
+        scene=scene,
+        camera_name=args_cli.camera_name,
+        pos=(1.0, 0.0, 0.6),
+        rot=(0.70711, 0.0, 0.70711, 0.0),
+    )
     scene.update(sim.get_physics_dt())
 
     ee_body_name = args_cli.ee_body_name or EE_BODY_NAME

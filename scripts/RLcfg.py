@@ -557,8 +557,8 @@ class TerminationsCfg:
 # 训练环境类
 @configclass
 class AuboRLEnvCfg(ManagerBasedRLEnvCfg):
-    # 场景设置 todo 搞懂env_spacing的作用
-    scene : AuboRLSceneCfg = AuboRLSceneCfg(num_envs = 1, env_spacing=2.5)
+    # 场景设置 
+    scene : AuboRLSceneCfg = AuboRLSceneCfg(num_envs = 1, env_spacing=25)
     # 基础设置 动作空间，观测空间
     observations : ObservationsCfg = ObservationsCfg()
     actions : ActionsCfg = ActionsCfg()
