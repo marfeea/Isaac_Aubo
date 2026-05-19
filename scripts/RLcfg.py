@@ -23,7 +23,7 @@ from logic import (
     AuboRewardFns,
     AuboTerminationFns,
 )
-from tool import AuboToolFns
+from tools.scene import AuboToolFns
 from asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
 
 import isaaclab.envs.mdp as mdp

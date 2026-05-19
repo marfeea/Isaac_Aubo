@@ -42,7 +42,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
 
 from asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
-from logic import AuboCameraFns
+from RenderCfg import TEST_RENDER_CFG
+from tools.camera import AuboCameraFns
 from RLcfg import AuboRLSceneCfg
 from Testcfg import TestSceneCfg
 
@@ -146,10 +147,8 @@ def print_asset_report(scene: InteractiveScene, ee_body_name: str) -> SceneEntit
 
 def reset_robot_to_default(scene: InteractiveScene) -> None:
     robot = scene[ROBOT_ASSET_NAME]
-    root_state = robot.data.default_root_state.clone()
-    root_state[:, :3] += scene.env_origins
-    robot.write_root_pose_to_sim(root_state[:, :7])
-    robot.write_root_velocity_to_sim(root_state[:, 7:])
+    root_velocity = torch.zeros_like(robot.data.default_root_state[:, 7:])
+    robot.write_root_velocity_to_sim(root_velocity)
     robot.write_joint_state_to_sim(robot.data.default_joint_pos.clone(), robot.data.default_joint_vel.clone())
     robot.reset()
 
@@ -164,6 +163,43 @@ def make_joint_waypoints(device: str, num_envs: int) -> torch.Tensor:
     ]
     waypoints_rad = [[math.radians(value) for value in row] for row in waypoints_deg]
     return torch.tensor(waypoints_rad, dtype=torch.float32, device=device).unsqueeze(1).repeat(1, num_envs, 1)
+
+
+def disable_station_collision_test_prims(scene: InteractiveScene) -> None:
+    """TODO: 临时禁用 station 中会导致 AUBObot1 初始化碰撞的两个物体。
+
+    后续更换 station 模型后删除这段测试逻辑。
+    当前禁用对象位于 station 模型的 WorkStation_All 目录下：
+    - M_SupportTray_07
+    - M_Reagent_05
+    """
+    disabled_names = {"M_SupportTray_07", "M_Reagent_05"}
+    station_subpath = "/station/WorkStation_All/"
+
+    prim_paths_to_disable = sorted(
+        {
+            str(prim.GetPath())
+            for prim in scene.stage.TraverseAll()
+            if station_subpath in str(prim.GetPath()) and prim.GetName() in disabled_names
+        },
+        key=lambda path: path.count("/"),
+        reverse=True,
+    )
+
+    disabled_paths = []
+    for prim_path in prim_paths_to_disable:
+        prim = scene.stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            continue
+        prim.SetActive(False)
+        disabled_paths.append(prim_path)
+
+    if disabled_paths:
+        print("[INFO] Disabled temporary station collision test prims:")
+        for prim_path in disabled_paths:
+            print(f"  {prim_path}")
+    else:
+        print("[WARN] No temporary station collision test prims were found to disable.")
 
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, entity_cfg: SceneEntityCfg) -> None:
@@ -186,15 +222,20 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
     scene.write_data_to_sim()
 
     while simulation_app.is_running():
+        # 机械臂播放逻辑：原本用于在若干关节路点之间做平滑插值，并把目标关节角写入控制器。
         alpha = step_in_cycle / max(args_cli.cycle_steps - 1, 1)
         smooth_alpha = 0.5 - 0.5 * math.cos(math.pi * alpha)
         joint_pos_des[:] = (1.0 - smooth_alpha) * q_start + smooth_alpha * q_goal
-
         robot.set_joint_position_target(joint_pos_des, joint_ids=entity_cfg.joint_ids)
+
+        # 将当前场景缓存写入仿真，随后推进一个物理步。
         scene.write_data_to_sim()
         sim.step()
+
+        # 从仿真中读取最新状态，更新 scene 内各资产和传感器数据。
         scene.update(sim_dt)
 
+        # 按仿真时间触发一次相机保存；env_ids=None 表示保存所有并行环境。
         sim_time = (total_steps + 1) * sim_dt
         if not capture_done and sim_time >= args_cli.capture_after_seconds:
             capture_done = True
@@ -214,6 +255,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
             except Exception as exc:
                 print(f"[WARN] Failed to save camera image: {exc}")
 
+        # 定期打印第一套环境中的 robot root、末端和 target 位置，便于观察场景是否稳定。
         if args_cli.print_every > 0 and total_steps % args_cli.print_every == 0:
             ee_body_id = int(entity_cfg.body_ids[0])
             ee_pos_w = robot.data.body_pose_w[0, ee_body_id, :3]
@@ -230,6 +272,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
         step_in_cycle += 1
         total_steps += 1
 
+        # 关节播放路点切换逻辑。机械臂运动关闭时仍保留计数，方便后续恢复播放代码。
         if step_in_cycle >= args_cli.cycle_steps:
             step_in_cycle = 0
             current_idx = next_idx
@@ -240,13 +283,15 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
 
 
 def main() -> None:
-    sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
+    sim_cfg = sim_utils.SimulationCfg(device=args_cli.device, render=TEST_RENDER_CFG.to_isaaclab())
     sim = sim_utils.SimulationContext(sim_cfg)
+    TEST_RENDER_CFG.apply_runtime_settings()
     sim.set_camera_view([2.5, -2.5, 1.8], [0.0, 0.0, 0.45])
 
     # 测试场景设置
     scene_cfg = TestSceneCfg(num_envs=args_cli.num_envs, env_spacing=25)
     scene = InteractiveScene(scene_cfg)
+    disable_station_collision_test_prims(scene)
 
     sim.reset()
     scene.update(sim.get_physics_dt())
