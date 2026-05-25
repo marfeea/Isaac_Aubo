@@ -2,6 +2,7 @@
 
 import argparse
 
+import _bootstrap  # noqa: F401
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
@@ -28,8 +29,8 @@ from isaaclab.controllers import DifferentialIKController, DifferentialIKControl
 from isaaclab.utils.math import subtract_frame_transforms
 
 
-from asset import EE_BODY_NAME
-from RLcfg import StateOnlyObsCfg, ActionsCfg, EventCfg, AuboRLSceneCfg
+from configs.asset import EE_BODY_NAME, VIEWPORT_CAMERA_EYE, VIEWPORT_CAMERA_TARGET
+from configs.RLcfg import StateOnlyObsCfg, ActionsCfg, EventCfg, AuboRLSceneCfg
 
 
 
@@ -156,7 +157,7 @@ def main():
     # Initialize the simulation context
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
-    sim.set_camera_view([3.5, 0.0, 3.2], [0.0, 0.0, 0.5])
+    sim.set_camera_view(VIEWPORT_CAMERA_EYE, VIEWPORT_CAMERA_TARGET)
     # Design scene
     scene_cfg = AuboRLSceneCfg(args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)

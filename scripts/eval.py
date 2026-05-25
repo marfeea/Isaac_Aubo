@@ -1,6 +1,8 @@
 ﻿import argparse
 from pathlib import Path
 
+import _bootstrap  # noqa: F401
+
 from isaaclab.app import AppLauncher
 
 
@@ -40,7 +42,7 @@ from stable_baselines3 import PPO
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper
 
-from RLcfg import AuboRLEnvCfg
+from configs.RLcfg import AuboRLEnvCfg
 
 
 def main() -> None:

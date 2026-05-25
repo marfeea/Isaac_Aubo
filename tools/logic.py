@@ -7,7 +7,7 @@ import torch
 import isaaclab.envs.mdp as mdp
 from isaaclab.managers import SceneEntityCfg
 
-from asset import EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
+from configs.asset import EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
 from tools.contact import AuboContactToolFns
 from tools.rl import AuboActionToolFns, AuboBufferToolFns
 from tools.scene import AuboToolFns

@@ -18,13 +18,13 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.envs.mdp.actions import ActionTerm, ActionTermCfg
-from logic import (
+from tools.logic import (
     reset_planning_obstacle_pose,
     AuboRewardFns,
     AuboTerminationFns,
 )
 from tools.scene import AuboToolFns
-from asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
+from configs.asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
 
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils

@@ -1,5 +1,7 @@
 # Template for Isaac Lab Projects
 
+[中文文档](README_CN.md)
+
 ## Overview
 
 This project/repository serves as a template for building projects or extensions based on Isaac Lab.
@@ -14,18 +16,29 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
 
 ## Project Structure
 
-The repository is organized around three concerns: runnable scripts, extension source code, and project-level tooling/configuration.
+The repository is organized around project configs, runnable scripts, reusable tools, extension source code, and project-level tooling.
 
 ```text
 Test/
 |-- README.md
-|-- READMECN.md
+|-- README_CN.md
 |-- pyproject.toml
 |-- .pre-commit-config.yaml
 |-- .vscode/
 |   `-- tools/
 |       `-- setup_vscode.py
+|-- configs/
+|   |-- asset.py
+|   |-- collision_cfg.py
+|   |-- RenderCfg.py
+|   |-- RLcfg.py
+|   `-- Testcfg.py
 |-- scripts/
+|   |-- _bootstrap.py
+|   |-- aubo.py
+|   |-- eval.py
+|   |-- test.py
+|   |-- train.py
 |   |-- list_envs.py
 |   |-- zero_agent.py
 |   |-- random_agent.py
@@ -42,6 +55,13 @@ Test/
 |       |-- train.py
 |       |-- play.py
 |       `-- cli_args.py
+|-- tools/
+|   |-- camera.py
+|   |-- contact.py
+|   |-- logic.py
+|   |-- rl.py
+|   |-- scene.py
+|   `-- tool.py
 `-- source/
     `-- Test/
         |-- setup.py
@@ -79,21 +99,45 @@ Test/
 ### Root directory
 
 - `README.md`: Main project documentation, including installation, usage, and development notes.
-- `READMECN.md`: Chinese translation of the main documentation.
+- `README_CN.md`: Chinese translation of the main documentation.
 - `pyproject.toml`: Repository-level Python tooling configuration, mainly used for build-system metadata in this template.
 - `.pre-commit-config.yaml`: Formatting and linting hooks used to keep the codebase consistent.
 - `.vscode/`: VSCode-related helper files. `tools/setup_vscode.py` is used to generate local IDE Python path configuration for Isaac Sim and Omniverse packages.
+
+### `configs/`
+
+This directory stores project-specific configuration modules that are imported by runnable scripts and task logic.
+
+- `asset.py`: Centralizes local USD asset roots, scene keys, robot poses, workstation poses, and interactive object placements.
+- `collision_cfg.py`: Describes workstation tabletop asset groups and split-USD scene loading helpers.
+- `RenderCfg.py`: Defines render settings and RTX runtime settings for visual test runs.
+- `RLcfg.py`: Defines the AUBO manager-based RL environment, scene, observation, action, reward, event, and termination configs.
+- `Testcfg.py`: Defines the visual inspection/test scene with workstation assets, two AUBO robots, and camera sensor config.
 
 ### `scripts/`
 
 This directory stores runnable entry scripts. These files are the command-line layer of the project and are usually the first place to start when training, evaluating, or inspecting tasks.
 
+- `_bootstrap.py`: Adds the repository root to `sys.path` so `scripts/*.py` can import `configs` and `tools` when run directly.
+- `aubo.py`: Interactive IK simulation script for checking AUBO motion in Isaac Sim.
+- `test.py`: Visual inspection and workstation/camera diagnostic script.
+- `train.py`: SB3 PPO training entry point for the local AUBO RL config.
+- `eval.py`: SB3 checkpoint evaluation entry point for the local AUBO RL config.
 - `list_envs.py`: Lists all registered environments exposed by this extension so you can confirm task registration and naming.
 - `zero_agent.py` and `random_agent.py`: Sanity-check scripts that run environments with trivial actions to verify environment setup before training.
 - `scripts/sb3/`, `scripts/skrl/`, `scripts/rl_games/`, `scripts/rsl_rl/`: Training and playback entry points for different RL backends.
-- `train.py`: Starts training for the selected backend and task.
-- `play.py`: Loads a trained policy or runs inference/visual evaluation for the selected backend.
 - `rsl_rl/cli_args.py`: Centralizes command-line arguments specific to the `rsl_rl` workflow.
+
+### `tools/`
+
+This directory stores reusable project logic and helper modules that are not meant to be launched directly.
+
+- `scene.py`: Scene/entity lookup, pose writing, workspace checks, and geometry helpers.
+- `rl.py`: Action and per-environment buffer helper functions for RL logic.
+- `contact.py`: Contact sensor compatibility helpers.
+- `camera.py`: Camera pose and PNG capture helpers.
+- `logic.py`: AUBO event, reward, and termination functions used by `configs/RLcfg.py`.
+- `tool.py`: Compatibility facade that re-exports common utility classes from the `tools` package.
 
 ### `source/Test/`
 
@@ -148,12 +192,13 @@ If you want to understand or modify the project efficiently, read files in this 
     ```bash
     # use 'PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
     python -m pip install -e source/Test
+    ```
 
 - Verify that the extension is correctly installed by:
 
     - Listing the available tasks:
 
-        Note: It the task name changes, it may be necessary to update the search pattern `"Template-"`
+        Note: If the task name changes, it may be necessary to update the search pattern `"Template-"`
         (in the `scripts/list_envs.py` file) so that it can be listed.
 
         ```bash
@@ -206,7 +251,7 @@ To enable your extension, follow these steps:
     - Navigate to the extension manager using `Window` -> `Extensions`.
     - Click on the **Hamburger Icon**, then go to `Settings`.
     - In the `Extension Search Paths`, enter the absolute path to the `source` directory of this project/repository.
-    - If not already present, in the `Extension Search Paths`, enter the path that leads to Isaac Lab's extension directory directory (`IsaacLab/source`)
+    - If not already present, in the `Extension Search Paths`, enter the path that leads to Isaac Lab's extension directory (`IsaacLab/source`)
     - Click on the **Hamburger Icon**, then click `Refresh`.
 
 2. **Search and enable your extension**:

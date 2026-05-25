@@ -4,15 +4,21 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.sensors.camera import Camera, CameraCfg
 
 
-from asset import (
+from configs.asset import (
     AUBO_ROBOT_USD,
-    AUBO_STATION_ROBOT_POS_1,
-    AUBO_STATION_ROBOT_POS_2,
+    AUBO_WORLD_ROBOT_POS_1,
+    AUBO_WORLD_ROBOT_POS_2,
+    AUBO_WORLD_ROBOT_ROT,
+    CAMERA_INITIAL_POS,
+    CAMERA_INITIAL_ROT,
+    CAMERA_POSE_CONVENTION,
     ENV_ASSET_USD,
     ROBOT_ASSET_NAME_1,
     ROBOT_ASSET_NAME_2,
-    STATION_ASSET_USD,
+    WORKSTATION_POS,
+    WORKSTATION_ROT,
 )
+from configs.collision_cfg import WorkstationTabletopLoadCfg, install_workstation_tabletop_scene_cfgs
 
 import isaaclab.sim as sim_utils
 
@@ -76,12 +82,12 @@ AUBO_CONFIG = ArticulationCfg(
 
 
 # 场景配置类
-def make_station_aubo_cfg(robot_name: str, station_local_pos: tuple[float, float, float]) -> ArticulationCfg:
+def make_aubo_cfg(robot_name: str, world_pos: tuple[float, float, float]) -> ArticulationCfg:
     return AUBO_CONFIG.replace(
-        prim_path=f"{{ENV_REGEX_NS}}/station/{robot_name}",
+        prim_path=f"{{ENV_REGEX_NS}}/{robot_name}",
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=station_local_pos,
-            rot=(1.0, 0.0, 0.0, 0.0),
+            pos=world_pos,
+            rot=AUBO_WORLD_ROBOT_ROT,
             joint_pos={
                 "Joint1": 0.0,
                 "Joint2": 0.0,
@@ -124,19 +130,21 @@ class TestSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # 工作站模型
-    AA_station = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/station",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=str(STATION_ASSET_USD),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                rigid_body_enabled=False,
-            ),
+    # Workstation tabletop assets are loaded as split USDs.
+    # Interactive objects use explicit world poses from asset.py.
+    install_workstation_tabletop_scene_cfgs(
+        locals(),
+
+        WorkstationTabletopLoadCfg(
+            prim_root="{ENV_REGEX_NS}/station",
+            station_pos=WORKSTATION_POS,
+            station_rot=WORKSTATION_ROT,
+            include_missing_assets=False,
+            strict_assets=False,
+            create_parent_xforms=True,
         ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(1.3, 0.0, 0.0),
-            rot=(0.70711, 0.0, 0.0, -0.70711),
-        ),
+
+        
     )
 
 
@@ -160,8 +168,8 @@ class TestSceneCfg(InteractiveSceneCfg):
     # )
 
     # robot
-    AUBObot = make_station_aubo_cfg(ROBOT_ASSET_NAME_1, AUBO_STATION_ROBOT_POS_1)
-    AUBObot_2 = make_station_aubo_cfg(ROBOT_ASSET_NAME_2, AUBO_STATION_ROBOT_POS_2)
+    AUBObot = make_aubo_cfg(ROBOT_ASSET_NAME_1, AUBO_WORLD_ROBOT_POS_1)
+    AUBObot_2 = make_aubo_cfg(ROBOT_ASSET_NAME_2, AUBO_WORLD_ROBOT_POS_2)
 
     # camera
     camera_cfg = CameraCfg(
@@ -180,6 +188,11 @@ class TestSceneCfg(InteractiveSceneCfg):
         colorize_semantic_segmentation=True,
         colorize_instance_id_segmentation=True,
         colorize_instance_segmentation=True,
+        offset=CameraCfg.OffsetCfg(
+            pos=CAMERA_INITIAL_POS,
+            rot=CAMERA_INITIAL_ROT,
+            convention=CAMERA_POSE_CONVENTION,
+        ),
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
         ),

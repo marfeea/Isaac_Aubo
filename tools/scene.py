@@ -6,7 +6,7 @@ import torch
 
 from isaaclab.managers import SceneEntityCfg
 
-from asset import EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
+from configs.asset import EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
 
 
 class AuboToolFns:

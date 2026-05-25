@@ -13,6 +13,7 @@ import argparse
 import math
 from pathlib import Path
 
+import _bootstrap  # noqa: F401
 from isaaclab.app import AppLauncher
 
 
@@ -26,6 +27,11 @@ parser.add_argument("--camera_name", type=str, default="camera_cfg", help="Scene
 parser.add_argument("--picture_dir", type=str, default=None, help="Image output directory. Defaults to <project>/picture.")
 parser.add_argument("--capture_after_seconds", type=float, default=5.0, help="Capture one camera image after this sim time.")
 parser.add_argument("--capture_data_type", type=str, default="rgb", help="Camera data output type to save.")
+parser.add_argument(
+    "--apply_workstation_collision_config",
+    action="store_true",
+    help="Apply the workstation collision body classification from collision_cfg.py.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -40,12 +46,26 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
+from omni.physx import get_physx_simulation_interface
+from omni.physx.bindings._physx import ContactEventType
+from pxr import PhysicsSchemaTools, PhysxSchema, UsdPhysics, UsdUtils
 
-from asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
-from RenderCfg import TEST_RENDER_CFG
+from configs.asset import (
+    AUBO_ROBOT_USD,
+    CAMERA_INITIAL_POS,
+    CAMERA_INITIAL_ROT,
+    EE_BODY_NAME,
+    ROBOT_ASSET_NAME,
+    TARGET_ASSET_NAME,
+    VIEWPORT_CAMERA_EYE,
+    VIEWPORT_CAMERA_TARGET,
+    WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS,
+)
+from configs.RenderCfg import TEST_RENDER_CFG
+from configs.collision_cfg import apply_workstation_collision_config
 from tools.camera import AuboCameraFns
-from RLcfg import AuboRLSceneCfg
-from Testcfg import TestSceneCfg
+from configs.RLcfg import AuboRLSceneCfg
+from configs.Testcfg import TestSceneCfg
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +95,29 @@ def _format_vec(tensor: torch.Tensor, precision: int = 4) -> str:
     return "[" + ", ".join(f"{value:.{precision}f}" for value in values) + "]"
 
 
+def _format_tuple(values, precision: int = 4) -> str:
+    return "[" + ", ".join(f"{float(value):.{precision}f}" for value in values) + "]"
+
+
+def _first_pose_from_asset(asset) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the first world pose from either RigidObject data or an XformPrimView."""
+    data = getattr(asset, "data", None)
+    if data is not None and hasattr(data, "root_pos_w") and hasattr(data, "root_pose_w"):
+        return data.root_pos_w[0, :3], data.root_pose_w[0, 3:7]
+
+    pose_owner = asset if hasattr(asset, "get_world_poses") else getattr(asset, "_view", None)
+    if pose_owner is None or not hasattr(pose_owner, "get_world_poses"):
+        raise AttributeError(f"Scene asset of type '{type(asset).__name__}' does not expose world pose data.")
+
+    positions, orientations = pose_owner.get_world_poses()
+    positions = torch.as_tensor(positions)
+    orientations = torch.as_tensor(orientations)
+
+    if positions.ndim == 3:
+        return positions[0, 0, :3], orientations[0, 0, :4]
+    return positions[0, :3], orientations[0, :4]
+
+
 def _print_names(title: str, names: list[str], list_all: bool, limit: int = 40) -> None:
     print(f"\n[INFO] {title} ({len(names)}):")
     shown = names if list_all else names[:limit]
@@ -97,7 +140,7 @@ def _resolve_robot_entity(scene: InteractiveScene, ee_body_name: str) -> SceneEn
 def print_asset_report(scene: InteractiveScene, ee_body_name: str) -> SceneEntityCfg:
     """Print one-time asset and placement diagnostics."""
     robot = scene[ROBOT_ASSET_NAME]
-    target = scene[TARGET_ASSET_NAME]
+    # target = scene[TARGET_ASSET_NAME]
 
     joint_names = _get_named_list(robot, "joint_names")
     body_names = _get_named_list(robot, "body_names")
@@ -105,14 +148,14 @@ def print_asset_report(scene: InteractiveScene, ee_body_name: str) -> SceneEntit
     print("\n========== Isaac Asset Inspection ==========")
     print(f"[INFO] USD path           : {AUBO_ROBOT_USD}")
     print(f"[INFO] Robot scene key    : {ROBOT_ASSET_NAME}")
-    print(f"[INFO] Target scene key   : {TARGET_ASSET_NAME}")
+    # print(f"[INFO] Target scene key   : {TARGET_ASSET_NAME}")
     print(f"[INFO] Requested EE body  : {ee_body_name}")
     print(f"[INFO] Num envs           : {scene.num_envs}")
     print(f"[INFO] Env origin[0]      : {_format_vec(scene.env_origins[0])}")
 
     print(f"[INFO] Robot root pos[0]  : {_format_vec(robot.data.root_pos_w[0, :3])}")
     print(f"[INFO] Robot root quat[0] : {_format_vec(robot.data.root_pose_w[0, 3:7])}")
-    print(f"[INFO] Target pos[0]      : {_format_vec(target.data.root_pos_w[0, :3])}")
+    # print(f"[INFO] Target pos[0]      : {_format_vec(target.data.root_pos_w[0, :3])}")
 
     _print_names("Joint names", joint_names, args_cli.list_all)
     _print_names("Body names", body_names, args_cli.list_all)
@@ -143,6 +186,47 @@ def print_asset_report(scene: InteractiveScene, ee_body_name: str) -> SceneEntit
     print("===========================================\n")
 
     return entity_cfg
+
+
+def print_workstation_interactive_report(scene: InteractiveScene) -> None:
+    """Print expected and actual root poses for split workstation interactive assets."""
+    print("\n========== Workstation Interactive Assets ==========")
+    for placement in WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS:
+        scene_key = str(placement["scene_key"])
+        try:
+            asset = scene[scene_key]
+        except KeyError:
+            print(f"[WARN] {scene_key}: missing from scene")
+            continue
+
+        actual_pos, actual_quat = _first_pose_from_asset(asset)
+        print(
+            f"[INFO] {scene_key} "
+            f"source={placement['source_name']} "
+            f"configured_pos={_format_tuple(placement['pos'])} "
+            f"actual_root_pos_w={_format_vec(actual_pos)} "
+            f"configured_rot={_format_tuple(placement['rot'])} "
+            f"actual_root_rot_w={_format_vec(actual_quat)} "
+            f"configured_scale={_format_tuple(placement.get('scale', (1.0, 1.0, 1.0)))}"
+        )
+    print("====================================================\n")
+
+
+def print_camera_pose_report(scene: InteractiveScene, camera_name: str) -> None:
+    """Print the configured and actual pose for the scene camera sensor."""
+    camera = AuboCameraFns.get_camera(scene=scene, camera_name=camera_name)
+    print("\n========== Camera Sensor Pose ==========")
+    print(f"[INFO] Camera scene key       : {camera_name}")
+    print(f"[INFO] Configured pos         : {_format_tuple(CAMERA_INITIAL_POS)}")
+    print(f"[INFO] Configured rot         : {_format_tuple(CAMERA_INITIAL_ROT)}")
+    try:
+        actual_pos, actual_quat = _first_pose_from_asset(camera)
+    except Exception as exc:
+        print(f"[WARN] Failed to read camera world pose: {exc}")
+    else:
+        print(f"[INFO] Actual root pos_w[0]   : {_format_vec(actual_pos)}")
+        print(f"[INFO] Actual root rot_w[0]   : {_format_vec(actual_quat)}")
+    print("========================================\n")
 
 
 def reset_robot_to_default(scene: InteractiveScene) -> None:
@@ -202,10 +286,84 @@ def disable_station_collision_test_prims(scene: InteractiveScene) -> None:
         print("[WARN] No temporary station collision test prims were found to disable.")
 
 
+def enable_contact_reports(scene: InteractiveScene) -> int:
+    """Enable PhysX contact reports on collision, rigid-body and articulation prims."""
+    enabled_count = 0
+    for prim in scene.stage.TraverseAll():
+        if not prim.IsValid() or not prim.IsActive():
+            continue
+        if not (
+            prim.HasAPI(UsdPhysics.CollisionAPI)
+            or prim.HasAPI(UsdPhysics.RigidBodyAPI)
+            or prim.HasAPI(UsdPhysics.ArticulationRootAPI)
+        ):
+            continue
+
+        contact_report_api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+        contact_report_api.CreateThresholdAttr().Set(0)
+        enabled_count += 1
+
+    print(f"[INFO] Enabled contact reports on {enabled_count} physics prims.")
+    return enabled_count
+
+
+class ContactReportPrinter:
+    """Print collider prim pairs when PhysX reports a new contact."""
+
+    def __init__(self, scene: InteractiveScene):
+        self._stage_id = UsdUtils.StageCache.Get().GetId(scene.stage).ToLongInt()
+        self._active_pairs: set[tuple[str, str]] = set()
+        self._current_step = 0
+        self._subscription = get_physx_simulation_interface().subscribe_contact_report_events(
+            self._on_contact_report_event
+        )
+
+    def set_step(self, step: int) -> None:
+        self._current_step = step
+
+    def close(self) -> None:
+        self._subscription = None
+
+    def _on_contact_report_event(self, contact_headers, contact_data) -> None:
+        del contact_data
+        for contact_header in contact_headers:
+            if int(contact_header.stage_id) != self._stage_id:
+                continue
+
+            collider0 = self._id_to_path(contact_header.collider0)
+            collider1 = self._id_to_path(contact_header.collider1)
+            if not collider0 or not collider1:
+                continue
+
+            pair = (collider0, collider1) if collider0 <= collider1 else (collider1, collider0)
+            if contact_header.type in (ContactEventType.CONTACT_FOUND, ContactEventType.CONTACT_PERSIST):
+                if pair not in self._active_pairs:
+                    self._active_pairs.add(pair)
+                    actor0 = self._id_to_path(contact_header.actor0)
+                    actor1 = self._id_to_path(contact_header.actor1)
+                    print(
+                        "[CONTACT] "
+                        f"step={self._current_step} "
+                        f"collider0={collider0} "
+                        f"collider1={collider1} "
+                        f"actor0={actor0} "
+                        f"actor1={actor1}"
+                    )
+            elif contact_header.type == ContactEventType.CONTACT_LOST:
+                self._active_pairs.discard(pair)
+
+    @staticmethod
+    def _id_to_path(path_id: int) -> str:
+        if int(path_id) == 0:
+            return ""
+        return str(PhysicsSchemaTools.intToSdfPath(path_id))
+
+
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, entity_cfg: SceneEntityCfg) -> None:
     robot = scene[ROBOT_ASSET_NAME]
-    target = scene[TARGET_ASSET_NAME]
+    # target = scene[TARGET_ASSET_NAME]
     sim_dt = sim.get_physics_dt()
+    contact_printer = ContactReportPrinter(scene)
 
     waypoints = make_joint_waypoints(robot.device, scene.num_envs)
     current_idx = 0
@@ -230,6 +388,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
 
         # 将当前场景缓存写入仿真，随后推进一个物理步。
         scene.write_data_to_sim()
+        contact_printer.set_step(total_steps + 1)
         sim.step()
 
         # 从仿真中读取最新状态，更新 scene 内各资产和传感器数据。
@@ -260,13 +419,13 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
             ee_body_id = int(entity_cfg.body_ids[0])
             ee_pos_w = robot.data.body_pose_w[0, ee_body_id, :3]
             root_pos_w = robot.data.root_pos_w[0, :3]
-            target_pos_w = target.data.root_pos_w[0, :3]
+            # target_pos_w = target.data.root_pos_w[0, :3]
             print(
                 "[LIVE] "
                 f"step={total_steps} "
                 f"root={_format_vec(root_pos_w)} "
                 f"ee={_format_vec(ee_pos_w)} "
-                f"target={_format_vec(target_pos_w)}"
+                # f"target={_format_vec(target_pos_w)}"
             )
 
         step_in_cycle += 1
@@ -281,29 +440,34 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
             q_goal = waypoints[next_idx].clone()
             print(f"[INFO] Switching playback waypoint: {current_idx} -> {next_idx}")
 
+    contact_printer.close()
+
 
 def main() -> None:
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device, render=TEST_RENDER_CFG.to_isaaclab())
     sim = sim_utils.SimulationContext(sim_cfg)
     TEST_RENDER_CFG.apply_runtime_settings()
-    sim.set_camera_view([2.5, -2.5, 1.8], [0.0, 0.0, 0.45])
+    sim.set_camera_view(VIEWPORT_CAMERA_EYE, VIEWPORT_CAMERA_TARGET)
 
     # 测试场景设置
     scene_cfg = TestSceneCfg(num_envs=args_cli.num_envs, env_spacing=25)
     scene = InteractiveScene(scene_cfg)
+    if args_cli.apply_workstation_collision_config:
+        apply_workstation_collision_config(scene)
     disable_station_collision_test_prims(scene)
+    enable_contact_reports(scene)
 
     sim.reset()
     scene.update(sim.get_physics_dt())
     AuboCameraFns.set_camera_pose(
         scene=scene,
         camera_name=args_cli.camera_name,
-        pos=(1.0, 0.0, 0.6),
-        rot=(0.70711, 0.0, 0.70711, 0.0),
     )
     scene.update(sim.get_physics_dt())
 
     ee_body_name = args_cli.ee_body_name or EE_BODY_NAME
+    print_camera_pose_report(scene, args_cli.camera_name)
+    print_workstation_interactive_report(scene)
     entity_cfg = print_asset_report(scene, ee_body_name)
 
     run_simulator(sim, scene, entity_cfg)
