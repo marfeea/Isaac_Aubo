@@ -25,6 +25,11 @@ from tools.logic import (
 )
 from tools.scene import AuboToolFns
 from configs.asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
+from configs.collision_cfg import (
+    ROBOT_CONTACT_FORCE_THRESHOLD,
+    ROBOT_CONTACT_SENSOR_CFG,
+    ROBOT_CONTACT_SENSOR_NAME,
+)
 
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
@@ -35,6 +40,7 @@ posa=(0,0,0)
 AUBO_CONFIG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=str(AUBO_ROBOT_USD),
+        activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             rigid_body_enabled=True,
             max_linear_velocity=1000.0,
@@ -415,6 +421,7 @@ class AuboRLSceneCfg(InteractiveSceneCfg):
     )
     # robot
     AUBObot = AUBO_CONFIG.replace(prim_path="{ENV_REGEX_NS}/AUBObot")
+    robot_contact_sensor = ROBOT_CONTACT_SENSOR_CFG
 
 # 奖励配置类
 @configclass
@@ -537,8 +544,13 @@ class TerminationsCfg:
         },
     )
 
-    # 当前场景未配置 ContactSensorCfg；先禁用传感器相关终止项，避免训练流程报错。
-    obstacle_collision = None
+    obstacle_collision = DoneTerm(
+        func=AuboTerminationFns.is_terminated_by_illegal_collision,
+        params={
+            "sensor_cfg": ROBOT_CONTACT_SENSOR_NAME,
+            "force_threshold": ROBOT_CONTACT_FORCE_THRESHOLD,
+        },
+    )
     self_collision = None
 
     ee_out_of_workspace = DoneTerm(

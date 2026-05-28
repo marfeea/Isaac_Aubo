@@ -28,9 +28,21 @@ parser.add_argument("--picture_dir", type=str, default=None, help="Image output 
 parser.add_argument("--capture_after_seconds", type=float, default=5.0, help="Capture one camera image after this sim time.")
 parser.add_argument("--capture_data_type", type=str, default="rgb", help="Camera data output type to save.")
 parser.add_argument(
+    "--contact_print_every",
+    type=int,
+    default=1,
+    help="Print ContactSensor force hits every N sim steps. Use 0 to disable.",
+)
+parser.add_argument(
+    "--contact_force_threshold",
+    type=float,
+    default=None,
+    help="Minimum ContactSensor force magnitude to print. Defaults to collision_cfg.py.",
+)
+parser.add_argument(
     "--apply_workstation_collision_config",
     action="store_true",
-    help="Apply the workstation collision body classification from collision_cfg.py.",
+    help="Apply the workstation collision scan and temporary overrides from collision_cfg.py.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -62,8 +74,14 @@ from configs.asset import (
     WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS,
 )
 from configs.RenderCfg import TEST_RENDER_CFG
-from configs.collision_cfg import apply_workstation_collision_config
+from configs.collision_cfg import (
+    ROBOT_CONTACT_FORCE_THRESHOLD,
+    ROBOT_CONTACT_SENSOR_NAME,
+    apply_workstation_collision_config,
+    disable_workstation_collision_prims,
+)
 from tools.camera import AuboCameraFns
+from tools.contact import AuboContactToolFns
 from configs.RLcfg import AuboRLSceneCfg
 from configs.Testcfg import TestSceneCfg
 
@@ -253,37 +271,11 @@ def disable_station_collision_test_prims(scene: InteractiveScene) -> None:
     """TODO: 临时禁用 station 中会导致 AUBObot1 初始化碰撞的两个物体。
 
     后续更换 station 模型后删除这段测试逻辑。
-    当前禁用对象位于 station 模型的 WorkStation_All 目录下：
+    当前禁用对象位于 split-USD station 路径下：
     - M_SupportTray_07
     - M_Reagent_05
     """
-    disabled_names = {"M_SupportTray_07", "M_Reagent_05"}
-    station_subpath = "/station/WorkStation_All/"
-
-    prim_paths_to_disable = sorted(
-        {
-            str(prim.GetPath())
-            for prim in scene.stage.TraverseAll()
-            if station_subpath in str(prim.GetPath()) and prim.GetName() in disabled_names
-        },
-        key=lambda path: path.count("/"),
-        reverse=True,
-    )
-
-    disabled_paths = []
-    for prim_path in prim_paths_to_disable:
-        prim = scene.stage.GetPrimAtPath(prim_path)
-        if not prim.IsValid():
-            continue
-        prim.SetActive(False)
-        disabled_paths.append(prim_path)
-
-    if disabled_paths:
-        print("[INFO] Disabled temporary station collision test prims:")
-        for prim_path in disabled_paths:
-            print(f"  {prim_path}")
-    else:
-        print("[WARN] No temporary station collision test prims were found to disable.")
+    disable_workstation_collision_prims(scene)
 
 
 def enable_contact_reports(scene: InteractiveScene) -> int:
@@ -359,11 +351,80 @@ class ContactReportPrinter:
         return str(PhysicsSchemaTools.intToSdfPath(path_id))
 
 
+class ContactSensorPrinter:
+    """Print ContactSensor force magnitudes above a threshold."""
+
+    def __init__(
+        self,
+        scene: InteractiveScene,
+        sensor_name: str = ROBOT_CONTACT_SENSOR_NAME,
+        force_threshold: float = ROBOT_CONTACT_FORCE_THRESHOLD,
+        print_every: int = 1,
+    ):
+        self._scene = scene
+        self._sensor_name = sensor_name
+        self._force_threshold = float(force_threshold)
+        self._print_every = int(print_every)
+        self._missing_reported = False
+        self._empty_reported = False
+
+    def update(self, step: int) -> None:
+        if self._print_every <= 0 or step % self._print_every != 0:
+            return
+
+        try:
+            sensor = self._scene[self._sensor_name]
+        except Exception:
+            if not self._missing_reported:
+                self._missing_reported = True
+                print(f"[WARN] ContactSensor '{self._sensor_name}' is not registered in the scene.")
+            return
+
+        magnitude = AuboContactToolFns.extract_contact_magnitude(sensor)
+        if magnitude is None:
+            if not self._empty_reported:
+                self._empty_reported = True
+                print(f"[WARN] ContactSensor '{self._sensor_name}' has no readable force tensor yet.")
+            return
+
+        env_magnitude = self._reshape_contact_magnitude(magnitude)
+        if env_magnitude.numel() == 0:
+            return
+
+        max_force, flat_ids = torch.max(env_magnitude, dim=1)
+        hit_env_ids = torch.nonzero(max_force > self._force_threshold, as_tuple=False).squeeze(-1)
+        for env_id in hit_env_ids.detach().cpu().tolist():
+            print(
+                "[CONTACT_SENSOR] "
+                f"step={step} "
+                f"env={env_id} "
+                f"max_force={float(max_force[env_id].detach().cpu()):.6f} "
+                f"flat_index={int(flat_ids[env_id].detach().cpu())} "
+                f"shape={tuple(magnitude.shape)}"
+            )
+
+    def _reshape_contact_magnitude(self, magnitude: torch.Tensor) -> torch.Tensor:
+        if magnitude.ndim == 0:
+            return magnitude.reshape(1, 1)
+        if magnitude.shape[0] == self._scene.num_envs:
+            return magnitude.reshape(self._scene.num_envs, -1)
+        return magnitude.reshape(1, -1)
+
+
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, entity_cfg: SceneEntityCfg) -> None:
     robot = scene[ROBOT_ASSET_NAME]
     # target = scene[TARGET_ASSET_NAME]
     sim_dt = sim.get_physics_dt()
     contact_printer = ContactReportPrinter(scene)
+    contact_sensor_printer = ContactSensorPrinter(
+        scene,
+        force_threshold=(
+            ROBOT_CONTACT_FORCE_THRESHOLD
+            if args_cli.contact_force_threshold is None
+            else args_cli.contact_force_threshold
+        ),
+        print_every=args_cli.contact_print_every,
+    )
 
     waypoints = make_joint_waypoints(robot.device, scene.num_envs)
     current_idx = 0
@@ -393,6 +454,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
 
         # 从仿真中读取最新状态，更新 scene 内各资产和传感器数据。
         scene.update(sim_dt)
+        contact_sensor_printer.update(total_steps + 1)
 
         # 按仿真时间触发一次相机保存；env_ids=None 表示保存所有并行环境。
         sim_time = (total_steps + 1) * sim_dt
@@ -454,7 +516,8 @@ def main() -> None:
     scene = InteractiveScene(scene_cfg)
     if args_cli.apply_workstation_collision_config:
         apply_workstation_collision_config(scene)
-    disable_station_collision_test_prims(scene)
+    else:
+        disable_station_collision_test_prims(scene)
     enable_contact_reports(scene)
 
     sim.reset()

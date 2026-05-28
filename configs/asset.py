@@ -26,7 +26,7 @@ EE_BODY_NAME = "Flange"
 
 # === 工作台基准位姿 ===
 # 工作台在每个 env 局部世界坐标系中的基准位置。
-WORKSTATION_POS = (0.0, 0.0, 0.0)
+WORKSTATION_POS = (1.3, 0.0, 0.0)
 # 工作台在每个 env 局部世界坐标系中的基准旋转四元数。
 WORKSTATION_ROT = (0.70711, 0.0, 0.0, -0.70711)
 # 拆分后的工作台零部件 USD 根目录。

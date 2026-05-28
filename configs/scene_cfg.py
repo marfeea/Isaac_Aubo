@@ -1,8 +1,7 @@
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.assets import AssetBaseCfg, RigidObjectCfg, ArticulationCfg
+from isaaclab.assets import AssetBaseCfg, ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.sensors.camera import Camera, CameraCfg
-
+from isaaclab.sensors.camera import CameraCfg
 
 from configs.asset import (
     AUBO_ROBOT_USD,
@@ -13,7 +12,7 @@ from configs.asset import (
     CAMERA_INITIAL_ROT,
     CAMERA_POSE_CONVENTION,
     ENV_ASSET_USD,
-    ROBOT_ASSET_NAME_1,
+    ROBOT_ASSET_NAME,
     ROBOT_ASSET_NAME_2,
     WORKSTATION_POS,
     WORKSTATION_ROT,
@@ -24,8 +23,10 @@ from configs.place_cfg import WorkstationTabletopLoadCfg, install_workstation_ta
 import isaaclab.sim as sim_utils
 
 
-# AUBOcfg 遨博机械臂实体配置
-posa = (0, 0, 0)
+TRAINING_ENV_SPACING = 25
+TRAINING_REPLICATE_PHYSICS = False
+
+
 AUBO_CONFIG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=str(AUBO_ROBOT_USD),
@@ -45,10 +46,9 @@ AUBO_CONFIG = ArticulationCfg(
             stabilization_threshold=0.001,
         ),
     ),
-
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=posa,
-        rot=(1.0, 0.0, 0.0, 0.0),
+        pos=AUBO_WORLD_ROBOT_POS_1,
+        rot=AUBO_WORLD_ROBOT_ROT,
         joint_pos={
             "Joint1": 0.0,
             "Joint2": 0.0,
@@ -58,7 +58,6 @@ AUBO_CONFIG = ArticulationCfg(
         },
         joint_vel={".*": 0.0},
     ),
-
     actuators={
         "arm": ImplicitActuatorCfg(
             joint_names_expr=["Joint[1-5]"],
@@ -83,7 +82,6 @@ AUBO_CONFIG = ArticulationCfg(
 )
 
 
-# 场景配置类
 def make_aubo_cfg(robot_name: str, world_pos: tuple[float, float, float]) -> ArticulationCfg:
     return AUBO_CONFIG.replace(
         prim_path=f"{{ENV_REGEX_NS}}/{robot_name}",
@@ -102,22 +100,15 @@ def make_aubo_cfg(robot_name: str, world_pos: tuple[float, float, float]) -> Art
     )
 
 
-class TestSceneCfg(InteractiveSceneCfg):
-    # # Ground-plane
-    # ground = AssetBaseCfg(
-    #     prim_path="/World/defaultGroundPlane", 
-    #     spawn=sim_utils.GroundPlaneCfg(),)
-
-    # lights
+class AuboTrainingSceneCfg(InteractiveSceneCfg):
     dome_light = AssetBaseCfg(
         prim_path="/World/Light",
         spawn=sim_utils.DomeLightCfg(
-            intensity=3000.0, 
+            intensity=3000.0,
             color=(0.75, 0.75, 0.75),
         ),
     )
 
-    # 背景环境资产：作为静态 USD 场景加载，不注册为可控 articulation。
     my_env = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Laboratory",
         spawn=sim_utils.UsdFileCfg(
@@ -132,11 +123,8 @@ class TestSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # Workstation tabletop assets are loaded as split USDs.
-    # Interactive objects use explicit world poses from asset.py.
     install_workstation_tabletop_scene_cfgs(
         locals(),
-
         WorkstationTabletopLoadCfg(
             prim_root="{ENV_REGEX_NS}/station",
             station_pos=WORKSTATION_POS,
@@ -145,36 +133,13 @@ class TestSceneCfg(InteractiveSceneCfg):
             strict_assets=False,
             create_parent_xforms=True,
         ),
-
-        
     )
 
-
-    # 配置需要的环境交互物
-    # 暂时不再需要配置
-    # target = RigidObjectCfg(
-    #     prim_path="{ENV_REGEX_NS}/target",
-    #     spawn=sim_utils.CuboidCfg(
-    #         size=(0.08, 0.08, 0.12),
-    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-    #             kinematic_enabled=True,   # 推荐：静态障碍物
-    #         ),
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #         visual_material=sim_utils.PreviewSurfaceCfg(
-    #             diffuse_color=(0.8, 0.2, 0.2),
-    #         ),
-    #     ),
-    #     init_state=RigidObjectCfg.InitialStateCfg(
-    #         pos=(0.45, 0.0, 0.6),   # 高度取半高，保证落在地面上
-    #     ),
-    # )
-
-    # robot
-    AUBObot = make_aubo_cfg(ROBOT_ASSET_NAME_1, AUBO_WORLD_ROBOT_POS_1)
+    AUBObot = make_aubo_cfg(ROBOT_ASSET_NAME, AUBO_WORLD_ROBOT_POS_1)
     AUBObot_2 = make_aubo_cfg(ROBOT_ASSET_NAME_2, AUBO_WORLD_ROBOT_POS_2)
+
     robot_contact_sensor = ROBOT_CONTACT_SENSOR_CFG
 
-    # camera
     camera_cfg = CameraCfg(
         prim_path="{ENV_REGEX_NS}/CameraSensor",
         update_period=0,
@@ -197,6 +162,17 @@ class TestSceneCfg(InteractiveSceneCfg):
             convention=CAMERA_POSE_CONVENTION,
         ),
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 1.0e5),
         ),
+    )
+
+
+def make_training_scene_cfg(num_envs: int = 1) -> AuboTrainingSceneCfg:
+    return AuboTrainingSceneCfg(
+        num_envs=num_envs,
+        env_spacing=TRAINING_ENV_SPACING,
+        replicate_physics=TRAINING_REPLICATE_PHYSICS,
     )
