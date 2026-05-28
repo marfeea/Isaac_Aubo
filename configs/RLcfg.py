@@ -10,9 +10,6 @@ from isaaclab.managers import RewardTermCfg as RewardTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.assets import AssetBaseCfg, RigidObjectCfg, ArticulationCfg
-from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 
 
@@ -24,74 +21,42 @@ from tools.logic import (
     AuboTerminationFns,
 )
 from tools.scene import AuboToolFns
-from configs.asset import AUBO_ROBOT_USD, EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
+from configs.asset import (
+    EE_BODY_NAME,
+    ROBOT_ASSET_NAME,
+    WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS,
+    WORKSTATION_INTERACTIVE_BASE_POS,
+)
 from configs.collision_cfg import (
     ROBOT_CONTACT_FORCE_THRESHOLD,
-    ROBOT_CONTACT_SENSOR_CFG,
     ROBOT_CONTACT_SENSOR_NAME,
 )
+from configs.scene_cfg import AuboTrainingSceneCfg, TRAINING_ENV_SPACING, TRAINING_REPLICATE_PHYSICS
 
 import isaaclab.envs.mdp as mdp
-import isaaclab.sim as sim_utils
 
 
-# AUBOcfg 遨博机械臂实体配置
-posa=(0,0,0)
-AUBO_CONFIG = ArticulationCfg(
-    spawn=sim_utils.UsdFileCfg(
-        usd_path=str(AUBO_ROBOT_USD),
-        activate_contact_sensors=True,
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            rigid_body_enabled=True,
-            max_linear_velocity=1000.0,
-            max_angular_velocity=1000.0,
-            max_depenetration_velocity=100.0,
-            enable_gyroscopic_forces=True,
-        ),
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,
-            solver_position_iteration_count=8,
-            solver_velocity_iteration_count=1,
-            sleep_threshold=0.005,
-            stabilization_threshold=0.001,
-        ),
-    ),
+RL_TARGET_CENTER = WORKSTATION_INTERACTIVE_BASE_POS
+DEFAULT_RL_TARGET_ASSET_NAME = WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS[0]["scene_key"]
+RL_WORKSPACE = {
+    "x": [0.45, 2.10],
+    "y": [-0.85, 1.20],
+    "z": [0.45, 1.60],
+}
 
-    init_state=ArticulationCfg.InitialStateCfg(
-        pos=posa,
-        rot=(1.0, 0.0, 0.0, 0.0),
-        joint_pos={
-            "Joint1": 0.0,
-            "Joint2": 0.0,
-            "Joint3": 0.0,
-            "Joint4": 0.0,
-            "Joint5": 0.0,
+
+def make_reset_target_pose_event(target_asset_name: str = DEFAULT_RL_TARGET_ASSET_NAME) -> EventTerm:
+    return EventTerm(
+        func=reset_planning_obstacle_pose,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg(target_asset_name),
+            "xy_radius": 0.45,
+            "z_radius": 0.18,
+            "z_range": (0.82, 1.06),
+            "center": RL_TARGET_CENTER,
         },
-        joint_vel={".*": 0.0},
-    ),
-
-    actuators={
-        "arm": ImplicitActuatorCfg(
-            joint_names_expr=["Joint[1-5]"],
-            effort_limit_sim=2400.0,
-            velocity_limit_sim=3.14,
-            stiffness={
-                "Joint1": 6000.0,
-                "Joint2": 6000.0,
-                "Joint3": 6000.0,
-                "Joint4": 8000.0,
-                "Joint5": 6000.0,
-            },
-            damping={
-                "Joint1": 4000.0,
-                "Joint2": 4000.0,
-                "Joint3": 4000.0,
-                "Joint4": 4000.0,
-                "Joint5": 4000.0,
-            },
-        ),
-    },
-)
+    )
 
 
 # 事件定义类，挂钩子用
@@ -118,18 +83,8 @@ class EventCfg:
         },
     )
 
-    # reset场景交互物体
-    reset_obstacle_pose = EventTerm(
-        func=reset_planning_obstacle_pose,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg(TARGET_ASSET_NAME),
-            "xy_radius": 0.50,              # 椭球在 x/y 方向半轴 a
-            "z_radius": 0.20,               # 椭球在 z 方向半轴 c
-            "z_range": (0.30, 0.70),        # 只取该高度带
-            "center": (0.0, 0.0, 0.5),      # 椭球中心（相对 env origin）
-        },
-    )
+    # 默认使用场景中已有的命名物体作为目标，不随机改写其位姿。
+    reset_obstacle_pose = None
 
 
 # 观测定义类A，仅状态训练
@@ -168,7 +123,7 @@ class StateOnlyObsCfg(ObsGroup):
     # 3. 任务状态
     target_pos = ObsTerm(
         func=AuboToolFns.get_root_pos_w,
-        params={"asset_cfg": SceneEntityCfg(TARGET_ASSET_NAME)},
+        params={"asset_cfg": SceneEntityCfg(DEFAULT_RL_TARGET_ASSET_NAME)},
     )
 
     to_target = ObsTerm(
@@ -176,7 +131,7 @@ class StateOnlyObsCfg(ObsGroup):
         params={
             "robot_asset_cfg": SceneEntityCfg(ROBOT_ASSET_NAME),
             "ee_body_name": EE_BODY_NAME,   
-            "target_asset_cfg": SceneEntityCfg(TARGET_ASSET_NAME),
+            "target_asset_cfg": SceneEntityCfg(DEFAULT_RL_TARGET_ASSET_NAME),
         },
     )
 
@@ -208,6 +163,7 @@ class AuboTaskSpaceIKAction(ActionTerm):
         super().__init__(cfg, env)
 
         self.robot = env.scene[cfg.asset_name]
+        self.target_asset_name = cfg.target_asset_name
 
         self.entity_cfg = SceneEntityCfg(
             cfg.asset_name,
@@ -321,8 +277,7 @@ class AuboTaskSpaceIKAction(ActionTerm):
         # 当前末端位置 + 位移增量
         target_pos_b = ee_pos_b + self._processed_actions[:, 0:3]
 
-        target_asset = self._env.scene[TARGET_ASSET_NAME]
-        goal_pos_w = target_asset.data.root_pos_w[:, :3]
+        goal_pos_w = AuboToolFns.get_root_pos_w(self._env, self.target_asset_name)
         identity_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=goal_pos_w.dtype)
         identity_quat_w[:, 0] = 1.0
         goal_pos_b, _ = subtract_frame_transforms(
@@ -354,6 +309,7 @@ class AuboTaskSpaceIKActionCfg(ActionTermCfg):
     class_type: type[ActionTerm] = AuboTaskSpaceIKAction
 
     asset_name: str = ROBOT_ASSET_NAME
+    target_asset_name: str = DEFAULT_RL_TARGET_ASSET_NAME
     joint_names: list[str] = ["Joint.*"]
     body_name: str = EE_BODY_NAME
 
@@ -380,48 +336,16 @@ class ActionsCfg:
 
     task_space_ik = AuboTaskSpaceIKActionCfg(
         asset_name=ROBOT_ASSET_NAME,
+        target_asset_name=DEFAULT_RL_TARGET_ASSET_NAME,
         joint_names=["Joint.*"],
         body_name=EE_BODY_NAME,
         pos_scale=(0.05, 0.05, 0.05),
         normalize_quat=True,
     )
 
-# 场景配置类
-class AuboRLSceneCfg(InteractiveSceneCfg):
-    # Ground-plane
-    ground = AssetBaseCfg(
-        prim_path="/World/defaultGroundPlane", 
-        spawn=sim_utils.GroundPlaneCfg(),)
-
-    # lights
-    dome_light = AssetBaseCfg(
-        prim_path="/World/Light",
-        spawn=sim_utils.DomeLightCfg(
-            intensity=3000.0, 
-            color=(0.75, 0.75, 0.75),
-        ),
-    )
-
-    # 配置需要的环境交互物
-    target = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/target",
-        spawn=sim_utils.CuboidCfg(
-            size=(0.08, 0.08, 0.12),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True,   # 推荐：静态障碍物
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.8, 0.2, 0.2),
-            ),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.45, 0.0, 0.6),   # 高度取半高，保证落在地面上
-        ),
-    )
-    # robot
-    AUBObot = AUBO_CONFIG.replace(prim_path="{ENV_REGEX_NS}/AUBObot")
-    robot_contact_sensor = ROBOT_CONTACT_SENSOR_CFG
+# 场景配置类：训练与测试都复用 configs.scene_cfg.AuboTrainingSceneCfg。
+class AuboRLSceneCfg(AuboTrainingSceneCfg):
+    pass
 
 # 奖励配置类
 @configclass
@@ -435,7 +359,7 @@ class RewardsCfg:
         params={
             "robot_asset_name": ROBOT_ASSET_NAME,
             "ee_body_name": EE_BODY_NAME,
-            "target_asset_name": TARGET_ASSET_NAME,
+            "target_asset_name": DEFAULT_RL_TARGET_ASSET_NAME,
         },
     )
 
@@ -446,7 +370,7 @@ class RewardsCfg:
         params={
             "robot_asset_name": ROBOT_ASSET_NAME,
             "ee_body_name": EE_BODY_NAME,
-            "target_asset_name": TARGET_ASSET_NAME,
+            "target_asset_name": DEFAULT_RL_TARGET_ASSET_NAME,
             "std": 0.20,
         },
     )
@@ -458,7 +382,7 @@ class RewardsCfg:
         params={
             "robot_asset_name": ROBOT_ASSET_NAME,
             "ee_body_name": EE_BODY_NAME,
-            "target_asset_name": TARGET_ASSET_NAME,
+            "target_asset_name": DEFAULT_RL_TARGET_ASSET_NAME,
             "threshold": 0.15,
             "progress_ref": 0.015,
             "action_norm_max": 0.75,
@@ -478,7 +402,7 @@ class RewardsCfg:
         params={
             "robot_asset_name": ROBOT_ASSET_NAME,
             "ee_body_name": EE_BODY_NAME,
-            "target_asset_name": TARGET_ASSET_NAME,
+            "target_asset_name": DEFAULT_RL_TARGET_ASSET_NAME,
             "far_eps": 0.50,
             "close_eps": 0.20,
             "w_far_move": 0.10,
@@ -518,7 +442,7 @@ class RewardsCfg:
     #     params={
     #         "robot_asset_name": ROBOT_ASSET_NAME,
     #         "ee_body_name": EE_BODY_NAME,
-    #         "obstacle_asset_name": TARGET_ASSET_NAME,
+    #         "obstacle_asset_name": DEFAULT_RL_TARGET_ASSET_NAME,
     #         "safe_margin": 0.08,
     #     },
     # )
@@ -537,7 +461,7 @@ class TerminationsCfg:
         func=AuboTerminationFns.goal_reached,
         params={
             "asset_cfg": ROBOT_ASSET_NAME,
-            "goal_pos_name": TARGET_ASSET_NAME,
+            "goal_pos_name": DEFAULT_RL_TARGET_ASSET_NAME,
             "ee_frame_name": EE_BODY_NAME,
             "pos_threshold": 0.15,
             "required_consecutive_steps": 3,
@@ -558,11 +482,7 @@ class TerminationsCfg:
         params={
             "asset_cfg": ROBOT_ASSET_NAME,
             "ee_frame_name": EE_BODY_NAME,
-            "workspace": {
-                "x": [-0.60, 0.60],
-                "y": [-0.60, 0.60],
-                "z": [0.05, 1.20],
-            },
+            "workspace": RL_WORKSPACE,
         },
     )
 
@@ -570,7 +490,11 @@ class TerminationsCfg:
 @configclass
 class AuboRLEnvCfg(ManagerBasedRLEnvCfg):
     # 场景设置 
-    scene : AuboRLSceneCfg = AuboRLSceneCfg(num_envs = 1, env_spacing=25)
+    scene : AuboRLSceneCfg = AuboRLSceneCfg(
+        num_envs=1,
+        env_spacing=TRAINING_ENV_SPACING,
+        replicate_physics=TRAINING_REPLICATE_PHYSICS,
+    )
     # 基础设置 动作空间，观测空间
     observations : ObservationsCfg = ObservationsCfg()
     actions : ActionsCfg = ActionsCfg()
@@ -589,3 +513,28 @@ class AuboRLEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1/ 120
         self.sim.render_interval = 4
+
+
+def configure_task_target(
+    env_cfg: AuboRLEnvCfg,
+    target_asset_name: str,
+    *,
+    randomize_target_pose: bool = False,
+) -> None:
+    """Route all RL task terms to the selected scene object key."""
+    env_cfg.observations.policy.target_pos.params["asset_cfg"] = SceneEntityCfg(target_asset_name)
+    env_cfg.observations.policy.to_target.params["target_asset_cfg"] = SceneEntityCfg(target_asset_name)
+
+    env_cfg.actions.task_space_ik.target_asset_name = target_asset_name
+
+    env_cfg.rewards.ee_progress.params["target_asset_name"] = target_asset_name
+    env_cfg.rewards.ee_distance_exp.params["target_asset_name"] = target_asset_name
+    env_cfg.rewards.success.params["target_asset_name"] = target_asset_name
+    env_cfg.rewards.action_far_near.params["target_asset_name"] = target_asset_name
+
+    env_cfg.terminations.goal_reached.params["goal_pos_name"] = target_asset_name
+
+    if randomize_target_pose:
+        env_cfg.events.reset_obstacle_pose = make_reset_target_pose_event(target_asset_name)
+    else:
+        env_cfg.events.reset_obstacle_pose = None

@@ -10,6 +10,22 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_envs", type=int, default=32)
 parser.add_argument("--total_timesteps", type=int, default=1_000_000)
+parser.add_argument(
+    "--progress_bar",
+    action="store_true",
+    help="Enable SB3 rich/tqdm progress bar. Disabled by default to avoid optional dependency startup failures.",
+)
+parser.add_argument(
+    "--target_asset_name",
+    type=str,
+    default=None,
+    help="Scene key of the named object used as the RL reaching target.",
+)
+parser.add_argument(
+    "--enable_camera_sensor",
+    action="store_true",
+    help="Keep the CameraSensor in the training scene. Disabled by default because training uses state observations.",
+)
 
 # 让 AppLauncher 也能接管它需要的参数
 AppLauncher.add_app_launcher_args(parser)
@@ -26,7 +42,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList, Check
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper
 
-from configs.RLcfg import AuboRLEnvCfg
+from configs.RLcfg import AuboRLEnvCfg, DEFAULT_RL_TARGET_ASSET_NAME, configure_task_target
 
 
 class EpisodeCurveCallback(BaseCallback):
@@ -63,18 +79,25 @@ class EpisodeCurveCallback(BaseCallback):
 
 def main():
     # 1) 创建环境配置
+    print("[TRAIN] Building AuboRLEnvCfg...", flush=True)
     env_cfg = AuboRLEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
+    if not args_cli.enable_camera_sensor:
+        env_cfg.scene.camera_cfg = None
+        print("[TRAIN] CameraSensor disabled for training.", flush=True)
+    configure_task_target(env_cfg, args_cli.target_asset_name or DEFAULT_RL_TARGET_ASSET_NAME)
 
     # 训练阶段建议关闭 viewer 依赖；如果你想偶尔看画面，再单独做 eval 脚本
     # env_cfg.viewer.eye = (8.0, 0.0, 5.0)
 
     # 2) 创建 Isaac Lab 环境
+    print(f"[TRAIN] Creating ManagerBasedRLEnv num_envs={env_cfg.scene.num_envs} device={env_cfg.sim.device}...", flush=True)
     env = ManagerBasedRLEnv(cfg=env_cfg)
 
     # 3) 最后一步再包 SB3 wrapper
     # 需要记录 Episode_Reward/* 与 Episode_Termination/* 到 infos，因此关闭 fast_variant。
+    print("[TRAIN] Wrapping env with Sb3VecEnvWrapper...", flush=True)
     env = Sb3VecEnvWrapper(env, fast_variant=False)
 
     # 4) checkpoint 回调
@@ -95,6 +118,7 @@ def main():
     callbacks = CallbackList([checkpoint_callback, curve_callback])
 
     # 5) PPO
+    print("[TRAIN] Creating PPO model...", flush=True)
     model = PPO(
         policy="MlpPolicy",
         env=env,
@@ -114,10 +138,15 @@ def main():
     )
 
     # 6) 开始训练
+    print(
+        f"[TRAIN] Starting learn total_timesteps={args_cli.total_timesteps} "
+        f"progress_bar={args_cli.progress_bar}...",
+        flush=True,
+    )
     model.learn(
         total_timesteps=args_cli.total_timesteps,
         callback=callbacks,
-        progress_bar=True,
+        progress_bar=args_cli.progress_bar,
     )
 
     # 7) 保存最终模型

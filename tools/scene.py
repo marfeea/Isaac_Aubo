@@ -127,7 +127,23 @@ class AuboToolFns:
     def get_root_pos_w(env, asset_cfg: SceneEntityCfg | str) -> torch.Tensor:
         """返回资产根节点世界坐标位置，形状为 (num_envs, 3)。"""
         asset = AuboToolFns.get_asset(env, asset_cfg)
-        return asset.data.root_pos_w[:, :3]
+        data = getattr(asset, "data", None)
+        root_pos_w = getattr(data, "root_pos_w", None)
+        if isinstance(root_pos_w, torch.Tensor):
+            return root_pos_w[:, :3]
+
+        poses = AuboToolFns._try_get_world_poses(asset)
+        if poses is None:
+            view = getattr(asset, "_view", None)
+            poses = AuboToolFns._try_get_world_poses(view)
+        if poses is not None:
+            positions, _ = poses
+            if positions.ndim == 1:
+                return positions[:3].reshape(1, 3)
+            return positions[:, :3]
+
+        asset_name = AuboToolFns.resolve_asset_name(asset_cfg)
+        raise AttributeError(f"Scene object '{asset_name}' does not expose a readable world/root pose.")
 
     @staticmethod
     def ee_to_target_vec_w(
@@ -320,6 +336,19 @@ class AuboToolFns:
             except TypeError:
                 continue
         return False
+
+    @staticmethod
+    def _try_get_world_poses(target):
+        """尝试通过 get_world_poses 接口读取静态资产或 XForm view 的位姿。"""
+        if target is None or not hasattr(target, "get_world_poses"):
+            return None
+        try:
+            positions, orientations = target.get_world_poses()
+        except TypeError:
+            return None
+        if isinstance(positions, torch.Tensor) and isinstance(orientations, torch.Tensor):
+            return positions, orientations
+        return None
 
     @staticmethod
     def _is_pos_tensor(value) -> bool:

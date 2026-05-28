@@ -24,7 +24,7 @@ import isaaclab.sim as sim_utils
 
 
 TRAINING_ENV_SPACING = 25
-TRAINING_REPLICATE_PHYSICS = False
+TRAINING_REPLICATE_PHYSICS = True
 
 
 AUBO_CONFIG = ArticulationCfg(

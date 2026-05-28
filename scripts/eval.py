@@ -31,6 +31,12 @@ parser.add_argument("--weight", type=str, required=True, help="Weight name or fu
 parser.add_argument("--num_envs", type=int, default=1, help="Number of parallel envs for evaluation.")
 parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to evaluate.")
 parser.add_argument("--deterministic", action="store_true", help="Use deterministic policy actions.")
+parser.add_argument(
+    "--target_asset_name",
+    type=str,
+    default=None,
+    help="Scene key of the named object used as the RL reaching target.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -42,7 +48,7 @@ from stable_baselines3 import PPO
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper
 
-from configs.RLcfg import AuboRLEnvCfg
+from configs.RLcfg import AuboRLEnvCfg, DEFAULT_RL_TARGET_ASSET_NAME, configure_task_target
 
 
 def main() -> None:
@@ -52,6 +58,7 @@ def main() -> None:
     env_cfg = AuboRLEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
+    configure_task_target(env_cfg, args_cli.target_asset_name or DEFAULT_RL_TARGET_ASSET_NAME)
 
     env = ManagerBasedRLEnv(cfg=env_cfg)
     env = Sb3VecEnvWrapper(env)

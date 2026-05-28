@@ -82,8 +82,8 @@ from configs.collision_cfg import (
 )
 from tools.camera import AuboCameraFns
 from tools.contact import AuboContactToolFns
-from configs.RLcfg import AuboRLSceneCfg
 from configs.Testcfg import TestSceneCfg
+from configs.scene_cfg import TRAINING_ENV_SPACING, TRAINING_REPLICATE_PHYSICS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -512,7 +512,11 @@ def main() -> None:
     sim.set_camera_view(VIEWPORT_CAMERA_EYE, VIEWPORT_CAMERA_TARGET)
 
     # 测试场景设置
-    scene_cfg = TestSceneCfg(num_envs=args_cli.num_envs, env_spacing=25)
+    scene_cfg = TestSceneCfg(
+        num_envs=args_cli.num_envs,
+        env_spacing=TRAINING_ENV_SPACING,
+        replicate_physics=TRAINING_REPLICATE_PHYSICS,
+    )
     scene = InteractiveScene(scene_cfg)
     if args_cli.apply_workstation_collision_config:
         apply_workstation_collision_config(scene)
