@@ -274,9 +274,21 @@ class AuboTerminationFns:
         magnitude = AuboContactToolFns.extract_contact_magnitude(sensor)
         if magnitude is None:
             return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        if magnitude.ndim == 1:
-            return magnitude > force_threshold
-        return torch.any(magnitude > force_threshold, dim=tuple(range(1, magnitude.ndim)))
+        flags = magnitude > force_threshold
+        if flags.shape[0] == env.num_envs:
+            if flags.ndim == 1:
+                return flags
+            return torch.any(flags, dim=tuple(range(1, flags.ndim)))
+
+        if flags.shape[0] % env.num_envs == 0:
+            grouped = flags.reshape(env.num_envs, -1, *flags.shape[1:])
+            return torch.any(grouped, dim=tuple(range(1, grouped.ndim)))
+
+        raise RuntimeError(
+            "Contact termination returned an incompatible leading dimension: "
+            f"shape={tuple(flags.shape)}, num_envs={env.num_envs}. "
+            "Check the ContactSensor prim_path matches one logical robot group per environment."
+        )
 
     @staticmethod
     def _print_hit_envs(template: str, flags: torch.Tensor) -> None:

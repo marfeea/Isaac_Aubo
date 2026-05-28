@@ -310,7 +310,7 @@ class AuboTaskSpaceIKActionCfg(ActionTermCfg):
 
     asset_name: str = ROBOT_ASSET_NAME
     target_asset_name: str = DEFAULT_RL_TARGET_ASSET_NAME
-    joint_names: list[str] = ["Joint.*"]
+    joint_names: list[str] = ["Joint.*", "Flange"]
     body_name: str = EE_BODY_NAME
 
     # 暂且更改为三维 dx dy dz
@@ -337,7 +337,7 @@ class ActionsCfg:
     task_space_ik = AuboTaskSpaceIKActionCfg(
         asset_name=ROBOT_ASSET_NAME,
         target_asset_name=DEFAULT_RL_TARGET_ASSET_NAME,
-        joint_names=["Joint.*"],
+        joint_names=["Joint.*", "Flange"],
         body_name=EE_BODY_NAME,
         pos_scale=(0.05, 0.05, 0.05),
         normalize_quat=True,

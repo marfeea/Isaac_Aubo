@@ -130,7 +130,7 @@ class AuboToolFns:
         data = getattr(asset, "data", None)
         root_pos_w = getattr(data, "root_pos_w", None)
         if isinstance(root_pos_w, torch.Tensor):
-            return root_pos_w[:, :3]
+            return AuboToolFns._expand_single_env_pose(env, root_pos_w[:, :3])
 
         poses = AuboToolFns._try_get_world_poses(asset)
         if poses is None:
@@ -139,8 +139,8 @@ class AuboToolFns:
         if poses is not None:
             positions, _ = poses
             if positions.ndim == 1:
-                return positions[:3].reshape(1, 3)
-            return positions[:, :3]
+                return AuboToolFns._expand_single_env_pose(env, positions[:3].reshape(1, 3))
+            return AuboToolFns._expand_single_env_pose(env, positions[:, :3])
 
         asset_name = AuboToolFns.resolve_asset_name(asset_cfg)
         raise AttributeError(f"Scene object '{asset_name}' does not expose a readable world/root pose.")
@@ -191,18 +191,28 @@ class AuboToolFns:
     ) -> torch.Tensor:
         """按 env 缓存、scene key、默认 goal_pos_w、目标资产的顺序解析目标点坐标。"""
         goal_pos = getattr(env, goal_pos_name, None)
-        if AuboToolFns._is_pos_tensor(goal_pos):
+        if isinstance(goal_pos, torch.Tensor) and goal_pos.ndim == 2 and goal_pos.shape[-1] >= 3:
             return goal_pos[:, :3]
 
-        try:
-            asset = env.scene[goal_pos_name]
-            if hasattr(asset, "data") and hasattr(asset.data, "root_pos_w"):
-                return asset.data.root_pos_w[:, :3]
-        except Exception:
-            pass
+        scene = getattr(env, "scene", None)
+        if scene is not None:
+            try:
+                asset = scene[goal_pos_name]
+            except KeyError:
+                asset = None
+            if asset is not None:
+                data = getattr(asset, "data", None)
+                root_pos_w = getattr(data, "root_pos_w", None)
+                if isinstance(root_pos_w, torch.Tensor) and root_pos_w.ndim == 2 and root_pos_w.shape[-1] >= 3:
+                    return root_pos_w[:, :3]
 
         fallback = getattr(env, "goal_pos_w", None)
-        if goal_pos_name != "goal_pos_w" and AuboToolFns._is_pos_tensor(fallback):
+        if (
+            goal_pos_name != "goal_pos_w"
+            and isinstance(fallback, torch.Tensor)
+            and fallback.ndim == 2
+            and fallback.shape[-1] >= 3
+        ):
             return fallback[:, :3]
 
         return AuboToolFns.get_root_pos_w(env, target_asset_name)
@@ -349,6 +359,19 @@ class AuboToolFns:
         if isinstance(positions, torch.Tensor) and isinstance(orientations, torch.Tensor):
             return positions, orientations
         return None
+
+    @staticmethod
+    def _expand_single_env_pose(env, positions: torch.Tensor) -> torch.Tensor:
+        """Expand a single env_0 world pose to all env origins when XForm views return one row."""
+        scene = getattr(env, "scene", None)
+        env_origins = getattr(scene, "env_origins", None)
+        num_envs = int(getattr(env, "num_envs", positions.shape[0]))
+        if not isinstance(env_origins, torch.Tensor) or positions.shape[0] != 1 or num_envs <= 1:
+            return positions
+
+        env_origins = env_origins.to(device=positions.device, dtype=positions.dtype)
+        local_pos = positions[0:1] - env_origins[0:1]
+        return local_pos + env_origins[:num_envs]
 
     @staticmethod
     def _is_pos_tensor(value) -> bool:

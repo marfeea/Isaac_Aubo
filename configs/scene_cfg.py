@@ -55,12 +55,13 @@ AUBO_CONFIG = ArticulationCfg(
             "Joint3": 0.0,
             "Joint4": 0.0,
             "Joint5": 0.0,
+            "Flange": 0.0,
         },
         joint_vel={".*": 0.0},
     ),
     actuators={
         "arm": ImplicitActuatorCfg(
-            joint_names_expr=["Joint[1-5]"],
+            joint_names_expr=["Joint.*", "Flange"],
             effort_limit_sim=2400.0,
             velocity_limit_sim=3.14,
             stiffness={
@@ -69,6 +70,7 @@ AUBO_CONFIG = ArticulationCfg(
                 "Joint3": 6000.0,
                 "Joint4": 8000.0,
                 "Joint5": 6000.0,
+                "Flange": 6000.0,
             },
             damping={
                 "Joint1": 4000.0,
@@ -76,6 +78,7 @@ AUBO_CONFIG = ArticulationCfg(
                 "Joint3": 4000.0,
                 "Joint4": 4000.0,
                 "Joint5": 4000.0,
+                "Flange": 4000.0,
             },
         ),
     },
@@ -94,6 +97,7 @@ def make_aubo_cfg(robot_name: str, world_pos: tuple[float, float, float]) -> Art
                 "Joint3": 0.0,
                 "Joint4": 0.0,
                 "Joint5": 0.0,
+                "Flange": 0.0,
             },
             joint_vel={".*": 0.0},
         ),
