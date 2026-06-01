@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils.math import subtract_frame_transforms
 
 from configs.asset import EE_BODY_NAME, ROBOT_ASSET_NAME, TARGET_ASSET_NAME
 
@@ -115,6 +116,26 @@ class AuboToolFns:
         asset = AuboToolFns.get_asset(env, asset_cfg)
         body_id = AuboToolFns.get_first_body_id(asset, body_name)
         return asset.data.body_pose_w[:, body_id, :3]
+
+    @staticmethod
+    def get_body_pos_in_root_frame(env, asset_cfg: SceneEntityCfg | str, body_name: str) -> torch.Tensor:
+        """Return a body position in its asset root frame, shape (num_envs, 3)."""
+        asset = AuboToolFns.get_asset(env, asset_cfg)
+        data = getattr(asset, "data", None)
+        body_pose_w = getattr(data, "body_pose_w", None)
+        root_pose_w = getattr(data, "root_pose_w", None)
+        if isinstance(body_pose_w, torch.Tensor) and isinstance(root_pose_w, torch.Tensor):
+            body_id = AuboToolFns.get_first_body_id(asset, body_name)
+            body_pose_w = body_pose_w[:, body_id]
+            body_pos_b, _ = subtract_frame_transforms(
+                root_pose_w[:, 0:3],
+                root_pose_w[:, 3:7],
+                body_pose_w[:, 0:3],
+                body_pose_w[:, 3:7],
+            )
+            return body_pos_b
+
+        return AuboToolFns.get_body_pos_w(env, asset_cfg, body_name) - AuboToolFns.get_root_pos_w(env, asset_cfg)
 
     @staticmethod
     def get_body_lin_vel_w(env, asset_cfg: SceneEntityCfg | str, body_name: str) -> torch.Tensor:

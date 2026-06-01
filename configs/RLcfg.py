@@ -38,10 +38,11 @@ import isaaclab.envs.mdp as mdp
 
 RL_TARGET_CENTER = WORKSTATION_INTERACTIVE_BASE_POS
 DEFAULT_RL_TARGET_ASSET_NAME = WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS[0]["scene_key"]
+# AUBObot root-frame bounds for Flange.
 RL_WORKSPACE = {
-    "x": [0.45, 2.10],
-    "y": [-0.85, 1.20],
-    "z": [0.45, 1.60],
+    "x": [-0.75, 0.75],
+    "y": [-0.75, 0.75],
+    "z": [0.20, 1.00],
 }
 
 
@@ -434,7 +435,17 @@ class RewardsCfg:
         params={},
     )
 
-    # 8) obstacle safety penalty：鼓励绕障留余量，不贴边走
+    # 8) collision penalty：显式惩罚 ContactSensor 检出的机器人碰撞。
+    collision_penalty = RewardTerm(
+        func=AuboRewardFns.penalty_collision,
+        weight=-50.0,
+        params={
+            "sensor_cfg": ROBOT_CONTACT_SENSOR_NAME,
+            "force_threshold": ROBOT_CONTACT_FORCE_THRESHOLD,
+        },
+    )
+
+    # 9) obstacle safety penalty：鼓励绕障留余量，不贴边走
     # 暂且没有加入障碍部分
     # obstacle_safe = RewardTerm(
     #     func=AuboRewardFns.penalty_ee_obstacle_safe,

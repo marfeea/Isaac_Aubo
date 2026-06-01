@@ -189,6 +189,15 @@ class AuboRewardFns:
         return torch.ones(env.num_envs, device=env.device)
 
     @staticmethod
+    def penalty_collision(
+        env,
+        sensor_cfg: SceneEntityCfg | str = "contact_sensor",
+        force_threshold: float = 1e-6,
+    ) -> torch.Tensor:
+        """Return 1.0 for envs whose robot contact force exceeds the threshold."""
+        return AuboTerminationFns._contact_done(env, sensor_cfg, force_threshold).float()
+
+    @staticmethod
     def _positive_progress(env, buffer_name: str, dist: torch.Tensor) -> torch.Tensor:
         prev_dist = AuboBufferToolFns.get_or_create(env, buffer_name, dist)
         AuboBufferToolFns.sync_just_reset(env, prev_dist, dist)
@@ -212,7 +221,6 @@ class AuboTerminationFns:
         """末端连续若干步保持在目标阈值内时终止。"""
         dist = AuboToolFns.ee_target_distance_w(env, asset_cfg, ee_frame_name, goal_pos_name)
         reached = dist < pos_threshold
-        AuboTerminationFns._print_hit_envs("[Test] terminate env{} true", reached)
 
         counter = AuboBufferToolFns.get_or_create(
             env,
@@ -224,9 +232,7 @@ class AuboTerminationFns:
             counter[env.episode_length_buf == 0] = 0
         env._goal_reached_consecutive_steps = counter
 
-        done = counter >= int(required_consecutive_steps)
-        AuboTerminationFns._print_hit_envs("[Test] terminate env{} success", done)
-        return done
+        return counter >= int(required_consecutive_steps)
 
     @staticmethod
     def ee_out_of_workspace(
@@ -235,13 +241,12 @@ class AuboTerminationFns:
         ee_frame_name: str = EE_BODY_NAME,
         workspace: dict | None = None,
     ) -> torch.Tensor:
-        """末端离开各环境局部轴对齐工作空间时终止。"""
+        """末端离开机器人根坐标系下的轴对齐工作空间时终止。"""
         if workspace is None:
             workspace = {"x": [-0.45, 0.45], "y": [-0.45, 0.45], "z": [0.05, 1.10]}
 
-        ee_pos_w = AuboToolFns.get_body_pos_w(env, asset_cfg, ee_frame_name)
-        ee_pos_local = ee_pos_w - env.scene.env_origins
-        return AuboToolFns.axis_aligned_workspace_mask(ee_pos_local, workspace)
+        ee_pos_b = AuboToolFns.get_body_pos_in_root_frame(env, asset_cfg, ee_frame_name)
+        return AuboToolFns.axis_aligned_workspace_mask(ee_pos_b, workspace)
 
     @staticmethod
     def is_terminated_by_illegal_collision(
@@ -290,8 +295,3 @@ class AuboTerminationFns:
             "Check the ContactSensor prim_path matches one logical robot group per environment."
         )
 
-    @staticmethod
-    def _print_hit_envs(template: str, flags: torch.Tensor) -> None:
-        hit_env_ids = torch.nonzero(flags, as_tuple=False).squeeze(-1)
-        for env_id in hit_env_ids.detach().cpu().tolist():
-            print(template.format(env_id))

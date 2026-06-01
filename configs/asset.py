@@ -236,7 +236,7 @@ WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS: tuple[WorkstationInteractiveAssetPlace
         group_label="sample_bottles",
         usd_path=WORKSTATION_PART_ROOT / "Reagent_01" / "M_Reagent_01.usd",
         scene_key="ws_interactive_reagent_01_sample_bottle",
-        local_pos=(0.158, 0.211, 0.0),
+        local_pos=(0.048, 0.211, 0.0),
         local_rot=REAGENT_LOCAL_ROT_Z_POS_90,
     ),
     _interactive_asset_placement(
