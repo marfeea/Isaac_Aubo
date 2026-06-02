@@ -44,6 +44,11 @@ parser.add_argument(
     help="Print collider prim paths when PhysX reports a new contact during training.",
 )
 parser.add_argument(
+    "--log_terminations",
+    action="store_true",
+    help="Print env index and reason whenever a training environment terminates.",
+)
+parser.add_argument(
     "--n_steps",
     type=int,
     default=1024,
@@ -122,6 +127,7 @@ class EpisodeRewardBreakdownCallback(BaseCallback):
         "step_penalty",
         "action_l2",
         "action_rate_l2",
+        "out_of_workspace_penalty",
         "collision_penalty",
     )
     TERMINATION_TERMS = ("goal_reached", "time_out", "obstacle_collision", "self_collision", "ee_out_of_workspace")
@@ -301,19 +307,23 @@ class ContactSensorCollisionCallback(BaseCallback):
 
         max_force, flat_ids = torch.max(env_magnitude, dim=1)
         current_envs = set(torch.nonzero(max_force > self.force_threshold, as_tuple=False).squeeze(-1).detach().cpu().tolist())
-        new_envs = current_envs - self._active_envs
+        episode_lengths = getattr(self.isaac_env, "episode_length_buf", None)
+        reset_envs = self._reset_envs(episode_lengths, current_envs)
+        new_envs = (current_envs - self._active_envs) | reset_envs
         self._active_envs = current_envs
         body_names = self._body_names(sensor)
         for env_id in sorted(new_envs):
             flat_index = int(flat_ids[env_id].detach().cpu())
             body_name = body_names[flat_index] if 0 <= flat_index < len(body_names) else f"flat_index={flat_index}"
+            episode_length_text = self._episode_length_text(episode_lengths, env_id)
             print(
                 "[TRAIN][collision_sensor] "
                 f"timestep={self.num_timesteps} "
                 f"env={env_id} "
                 f"robot_body={body_name} "
                 f"max_force={float(max_force[env_id].detach().cpu()):.6f} "
-                f"raw_shape={tuple(magnitude.shape)}",
+                f"raw_shape={tuple(magnitude.shape)}"
+                f"{episode_length_text}",
                 flush=True,
             )
         return True
@@ -327,6 +337,26 @@ class ContactSensorCollisionCallback(BaseCallback):
         if magnitude.shape[0] % num_envs == 0:
             return magnitude.reshape(num_envs, -1)
         return magnitude.reshape(1, -1)
+
+    @staticmethod
+    def _reset_envs(episode_lengths, current_envs: set[int]) -> set[int]:
+        if episode_lengths is None:
+            return set()
+        reset_envs: set[int] = set()
+        for env_id in current_envs:
+            if env_id >= int(episode_lengths.numel()):
+                continue
+            episode_length = int(episode_lengths[env_id].detach().cpu())
+            if episode_length <= 1:
+                reset_envs.add(env_id)
+        return reset_envs
+
+    @staticmethod
+    def _episode_length_text(episode_lengths, env_id: int) -> str:
+        if episode_lengths is None or env_id >= int(episode_lengths.numel()):
+            return ""
+        episode_length = int(episode_lengths[env_id].detach().cpu())
+        return f" episode_length={episode_length}"
 
     @staticmethod
     def _body_names(sensor) -> list[str]:
@@ -371,6 +401,7 @@ def print_training_summary(env_cfg: AuboRLEnvCfg, target_asset_name: str) -> Non
         "interactive_viewer": args_cli.interactive_viewer and not getattr(args_cli, "headless", False),
         "log_reward_breakdown": args_cli.log_reward_breakdown,
         "log_collisions": args_cli.log_collisions,
+        "log_terminations": args_cli.log_terminations,
         "sb3_console_log": True,
         "sb3_log_interval": 1,
     }
@@ -383,6 +414,18 @@ def robot_contact_filter(paths) -> bool:
     return any(ROBOT_ASSET_NAME in path.split("/") for path in paths if path)
 
 
+def configure_termination_logging(env_cfg: AuboRLEnvCfg, enabled: bool) -> None:
+    """Inject per-term print controls without changing the default task config."""
+    for term_name in EpisodeRewardBreakdownCallback.TERMINATION_TERMS:
+        term_cfg = getattr(env_cfg.terminations, term_name, None)
+        if term_cfg is None:
+            continue
+        if getattr(term_cfg, "params", None) is None:
+            term_cfg.params = {}
+        term_cfg.params["log_termination"] = bool(enabled)
+        term_cfg.params["termination_reason"] = term_name
+
+
 def main():
     # 1) 创建环境配置
     env_cfg = AuboRLEnvCfg()
@@ -392,6 +435,7 @@ def main():
         env_cfg.scene.camera_cfg = None
     target_asset_name = args_cli.target_asset_name or DEFAULT_RL_TARGET_ASSET_NAME
     configure_task_target(env_cfg, target_asset_name)
+    configure_termination_logging(env_cfg, args_cli.log_terminations)
     if args_cli.skip_reset_scene_event:
         env_cfg.events.reset_scene = None
     print_training_summary(env_cfg, target_asset_name)

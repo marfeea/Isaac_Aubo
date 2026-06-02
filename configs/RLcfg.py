@@ -42,7 +42,7 @@ DEFAULT_RL_TARGET_ASSET_NAME = WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS[0]["scen
 RL_WORKSPACE = {
     "x": [-0.75, 0.75],
     "y": [-0.75, 0.75],
-    "z": [0.20, 1.00],
+    "z": [0.20, 1.1],
 }
 
 
@@ -414,38 +414,57 @@ class RewardsCfg:
         },
     )
 
-    # 5) step penalty：防止拖延。
+    # 5) step penalty：轻量但持续的时间代价。
+    # IsaacLab 会按 step_dt=decimation*sim.dt=0.25 缩放 reward；
+    # weight=-0.5 对应每次决策约 -0.125，80 步 timeout 约 -10。
     step_penalty = RewardTerm(
         func=AuboRewardFns.penalty_step,
-        weight=-0.03,
+        weight=-0.5,
         params={},
     )
 
     # 6) action magnitude penalty：抑制过猛动作。
     action_l2 = RewardTerm(
         func=AuboRewardFns.penalty_action_l2,
-        weight=-0.02,
+        weight=-0.05,
         params={},
     )
 
     # 7) action rate penalty：抑制高频抖动。
     action_rate_l2 = RewardTerm(
         func=AuboRewardFns.penalty_action_rate_l2,
-        weight=-0.10,
+        weight=-0.20,
         params={},
     )
 
-    # 8) collision penalty：显式惩罚 ContactSensor 检出的机器人碰撞。
-    collision_penalty = RewardTerm(
-        func=AuboRewardFns.penalty_collision,
-        weight=-50.0,
+    # 8) out-of-workspace penalty：base penalty is about -25 at 80 steps.
+    # Earlier failures get up to 48% extra penalty to avoid short bad rollouts.
+    out_of_workspace_penalty = RewardTerm(
+        func=AuboRewardFns.penalty_ee_out_of_workspace,
+        weight=-100.0,
         params={
-            "sensor_cfg": ROBOT_CONTACT_SENSOR_NAME,
-            "force_threshold": ROBOT_CONTACT_FORCE_THRESHOLD,
+            "asset_cfg": ROBOT_ASSET_NAME,
+            "ee_frame_name": EE_BODY_NAME,
+            "workspace": RL_WORKSPACE,
+            "max_episode_steps": 80,
+            "early_failure_scale": 0.48,
         },
     )
 
-    # 9) obstacle safety penalty：鼓励绕障留余量，不贴边走
+    # 9) collision penalty：base penalty is about -35 at 80 steps.
+    # Earlier collisions get about -12 extra actual reward penalty.
+    collision_penalty = RewardTerm(
+        func=AuboRewardFns.penalty_collision,
+        weight=-140.0,
+        params={
+            "sensor_cfg": ROBOT_CONTACT_SENSOR_NAME,
+            "force_threshold": ROBOT_CONTACT_FORCE_THRESHOLD,
+            "max_episode_steps": 80,
+            "early_failure_scale": 0.342857,
+        },
+    )
+
+    # 10) obstacle safety penalty：鼓励绕障留余量，不贴边走
     # 暂且没有加入障碍部分
     # obstacle_safe = RewardTerm(
     #     func=AuboRewardFns.penalty_ee_obstacle_safe,

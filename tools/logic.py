@@ -189,13 +189,33 @@ class AuboRewardFns:
         return torch.ones(env.num_envs, device=env.device)
 
     @staticmethod
+    def penalty_ee_out_of_workspace(
+        env,
+        asset_cfg: SceneEntityCfg | str = ROBOT_ASSET_NAME,
+        ee_frame_name: str = EE_BODY_NAME,
+        workspace: dict | None = None,
+        max_episode_steps: int = 80,
+        early_failure_scale: float = 0.48,
+    ) -> torch.Tensor:
+        """Return a larger penalty signal for earlier workspace failures."""
+        if workspace is None:
+            workspace = {"x": [-0.45, 0.45], "y": [-0.45, 0.45], "z": [0.05, 1.10]}
+
+        ee_pos_b = AuboToolFns.get_body_pos_in_root_frame(env, asset_cfg, ee_frame_name)
+        failed = AuboToolFns.axis_aligned_workspace_mask(ee_pos_b, workspace).float()
+        return failed * AuboRewardFns._early_failure_multiplier(env, max_episode_steps, early_failure_scale)
+
+    @staticmethod
     def penalty_collision(
         env,
         sensor_cfg: SceneEntityCfg | str = "contact_sensor",
         force_threshold: float = 1e-6,
+        max_episode_steps: int = 80,
+        early_failure_scale: float = 0.342857,
     ) -> torch.Tensor:
-        """Return 1.0 for envs whose robot contact force exceeds the threshold."""
-        return AuboTerminationFns._contact_done(env, sensor_cfg, force_threshold).float()
+        """Return a larger penalty signal for earlier collision failures."""
+        failed = AuboTerminationFns._contact_done(env, sensor_cfg, force_threshold).float()
+        return failed * AuboRewardFns._early_failure_multiplier(env, max_episode_steps, early_failure_scale)
 
     @staticmethod
     def _positive_progress(env, buffer_name: str, dist: torch.Tensor) -> torch.Tensor:
@@ -204,6 +224,22 @@ class AuboRewardFns:
         progress = torch.clamp(prev_dist - dist, min=0.0)
         setattr(env, buffer_name, dist.clone())
         return progress
+
+    @staticmethod
+    def _early_failure_multiplier(
+        env,
+        max_episode_steps: int,
+        early_failure_scale: float,
+    ) -> torch.Tensor:
+        """Scale terminal failure penalties so earlier failures are worse."""
+        max_steps = max(int(max_episode_steps), 1)
+        if hasattr(env, "episode_length_buf"):
+            step = env.episode_length_buf.to(device=env.device, dtype=torch.float32)
+        else:
+            step = torch.zeros(env.num_envs, device=env.device)
+
+        remaining_fraction = torch.clamp(1.0 - step / float(max_steps), 0.0, 1.0)
+        return 1.0 + float(early_failure_scale) * remaining_fraction
 
 
 class AuboTerminationFns:
@@ -217,6 +253,8 @@ class AuboTerminationFns:
         ee_frame_name: str = EE_BODY_NAME,
         pos_threshold: float = 0.15,
         required_consecutive_steps: int = 3,
+        log_termination: bool = False,
+        termination_reason: str = "goal_reached",
     ) -> torch.Tensor:
         """末端连续若干步保持在目标阈值内时终止。"""
         dist = AuboToolFns.ee_target_distance_w(env, asset_cfg, ee_frame_name, goal_pos_name)
@@ -232,7 +270,8 @@ class AuboTerminationFns:
             counter[env.episode_length_buf == 0] = 0
         env._goal_reached_consecutive_steps = counter
 
-        return counter >= int(required_consecutive_steps)
+        done = counter >= int(required_consecutive_steps)
+        return AuboTerminationFns._print_done(env, done, termination_reason, log_termination)
 
     @staticmethod
     def ee_out_of_workspace(
@@ -240,13 +279,16 @@ class AuboTerminationFns:
         asset_cfg: SceneEntityCfg | str = ROBOT_ASSET_NAME,
         ee_frame_name: str = EE_BODY_NAME,
         workspace: dict | None = None,
+        log_termination: bool = False,
+        termination_reason: str = "ee_out_of_workspace",
     ) -> torch.Tensor:
         """末端离开机器人根坐标系下的轴对齐工作空间时终止。"""
         if workspace is None:
             workspace = {"x": [-0.45, 0.45], "y": [-0.45, 0.45], "z": [0.05, 1.10]}
 
         ee_pos_b = AuboToolFns.get_body_pos_in_root_frame(env, asset_cfg, ee_frame_name)
-        return AuboToolFns.axis_aligned_workspace_mask(ee_pos_b, workspace)
+        done = AuboToolFns.axis_aligned_workspace_mask(ee_pos_b, workspace)
+        return AuboTerminationFns._print_done(env, done, termination_reason, log_termination)
 
     @staticmethod
     def is_terminated_by_illegal_collision(
@@ -254,24 +296,97 @@ class AuboTerminationFns:
         sensor_cfg: SceneEntityCfg | str = "contact_sensor",
         body_names: Sequence[str] | None = None,
         force_threshold: float = 1e-6,
+        log_termination: bool = False,
+        termination_reason: str = "obstacle_collision",
     ) -> torch.Tensor:
         """不同传感器 schema 下的非法碰撞终止。"""
         del body_names
-        return AuboTerminationFns._contact_done(env, sensor_cfg, force_threshold)
+        done = AuboTerminationFns._contact_done(env, sensor_cfg, force_threshold)
+        return AuboTerminationFns._print_done(env, done, termination_reason, log_termination)
 
     @staticmethod
     def is_terminated_by_self_collision(
         env,
         sensor_cfg: SceneEntityCfg | str = "contact_sensor",
         force_threshold: float = 1e-6,
+        log_termination: bool = False,
+        termination_reason: str = "self_collision",
     ) -> torch.Tensor:
         """不同传感器 schema 下的自碰撞终止。"""
-        return AuboTerminationFns._contact_done(env, sensor_cfg, force_threshold)
+        done = AuboTerminationFns._contact_done(env, sensor_cfg, force_threshold)
+        return AuboTerminationFns._print_done(env, done, termination_reason, log_termination)
 
     @staticmethod
-    def times_out(env) -> torch.Tensor:
+    def times_out(
+        env,
+        log_termination: bool = False,
+        termination_reason: str = "time_out",
+    ) -> torch.Tensor:
         """复用 Isaac Lab 默认 timeout 终止项。"""
-        return mdp.time_out(env)
+        done = mdp.time_out(env)
+        return AuboTerminationFns._print_done(env, done, termination_reason, log_termination)
+
+    @staticmethod
+    def _print_done(
+        env,
+        done: torch.Tensor,
+        reason: str,
+        enabled: bool,
+    ) -> torch.Tensor:
+        if not enabled or done.numel() == 0:
+            return done
+
+        done_ids = torch.nonzero(done.detach(), as_tuple=False).flatten()
+        if done_ids.numel() == 0:
+            return done
+
+        step = AuboTerminationFns._global_step(env)
+        printed = getattr(env, "_aubo_printed_termination_keys", None)
+        if printed is None:
+            printed = set()
+            env._aubo_printed_termination_keys = printed
+
+        episode_lengths = getattr(env, "episode_length_buf", None)
+        for env_id in done_ids.detach().cpu().tolist():
+            if step >= 0:
+                key = (step, int(env_id), str(reason))
+                if key in printed:
+                    continue
+                printed.add(key)
+                if len(printed) > 10000:
+                    printed.clear()
+                    printed.add(key)
+
+            episode_length_text = ""
+            if episode_lengths is not None and int(env_id) < int(episode_lengths.numel()):
+                episode_length = int(episode_lengths[int(env_id)].detach().cpu())
+                episode_length_text = f" episode_length={episode_length}"
+
+            print(
+                "[TRAIN][termination] "
+                f"timestep={step} "
+                f"env={int(env_id)} "
+                f"reason={reason}"
+                f"{episode_length_text}",
+                flush=True,
+            )
+        return done
+
+    @staticmethod
+    def _global_step(env) -> int:
+        for name in ("common_step_counter", "_sim_step_counter"):
+            value = getattr(env, name, None)
+            if value is None:
+                continue
+            if isinstance(value, torch.Tensor):
+                if value.numel() == 0:
+                    continue
+                return int(value.detach().flatten()[0].cpu())
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return -1
 
     @staticmethod
     def _contact_done(env, sensor_cfg: SceneEntityCfg | str, force_threshold: float) -> torch.Tensor:
