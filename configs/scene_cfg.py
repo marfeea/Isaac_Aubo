@@ -16,8 +16,9 @@ from configs.asset import (
     ROBOT_ASSET_NAME_2,
     WORKSTATION_POS,
     WORKSTATION_ROT,
+    WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS,
 )
-from configs.collision_cfg import ROBOT_CONTACT_SENSOR_CFG
+from configs.collision_cfg import ROBOT_CONTACT_SENSOR_CFG, make_target_contact_sensor_cfg
 from configs.place_cfg import WorkstationTabletopLoadCfg, install_workstation_tabletop_scene_cfgs
 
 import isaaclab.sim as sim_utils
@@ -143,6 +144,9 @@ class AuboTrainingSceneCfg(InteractiveSceneCfg):
     AUBObot_2 = make_aubo_cfg(ROBOT_ASSET_NAME_2, AUBO_WORLD_ROBOT_POS_2)
 
     robot_contact_sensor = ROBOT_CONTACT_SENSOR_CFG
+    target_contact_sensor = make_target_contact_sensor_cfg(
+        f"{{ENV_REGEX_NS}}/station/interactive/{WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS[0]['name']}"
+    )
 
     camera_cfg = CameraCfg(
         prim_path="{ENV_REGEX_NS}/CameraSensor",

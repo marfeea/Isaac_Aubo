@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from configs.asset import ROBOT_ASSET_NAME
+from configs.asset import EE_BODY_NAME, ROBOT_ASSET_NAME
 from configs.place_cfg import (
     ALL_COLLIDER_NAMES,
     DYNAMIC_COLLIDER_NAMES,
@@ -25,7 +25,11 @@ from isaaclab.sensors import ContactSensorCfg
 
 ROBOT_CONTACT_SENSOR_NAME = "robot_contact_sensor"
 ROBOT_CONTACT_SENSOR_PRIM_PATH = f"{{ENV_REGEX_NS}}/{ROBOT_ASSET_NAME}/.*"
-ROBOT_CONTACT_FORCE_THRESHOLD = 1.0e-6
+ROBOT_CONTACT_FORCE_THRESHOLD = 50.0
+ROBOT_IGNORED_CONTACT_BODY_NAMES = ("Base_Link",)
+TARGET_CONTACT_SENSOR_NAME = "target_contact_sensor"
+TARGET_CONTACT_SENSOR_PRIM_PATH = f"{{ENV_REGEX_NS}}/{ROBOT_ASSET_NAME}/{EE_BODY_NAME}"
+TARGET_CONTACT_FORCE_THRESHOLD = 1.0e-6
 
 ROBOT_CONTACT_SENSOR_CFG = ContactSensorCfg(
     prim_path=ROBOT_CONTACT_SENSOR_PRIM_PATH,
@@ -36,6 +40,25 @@ ROBOT_CONTACT_SENSOR_CFG = ContactSensorCfg(
     track_air_time=False,
     force_threshold=ROBOT_CONTACT_FORCE_THRESHOLD,
 )
+
+
+def make_target_contact_sensor_cfg(target_prim_path: str) -> ContactSensorCfg:
+    """Create a Flange-only contact sensor filtered to the active task target."""
+    kwargs = dict(
+        prim_path=TARGET_CONTACT_SENSOR_PRIM_PATH,
+        update_period=0.0,
+        history_length=3,
+        debug_vis=False,
+        track_pose=True,
+        track_air_time=False,
+        force_threshold=TARGET_CONTACT_FORCE_THRESHOLD,
+    )
+    try:
+        return ContactSensorCfg(**kwargs, filter_prim_paths_expr=[target_prim_path])
+    except TypeError:
+        cfg = ContactSensorCfg(**kwargs)
+        cfg.filter_prim_paths_expr = [target_prim_path]
+        return cfg
 
 
 TEMPORARY_DISABLED_WORKSTATION_COLLIDER_NAMES = frozenset(
@@ -176,6 +199,10 @@ __all__ = [
     "ROBOT_CONTACT_SENSOR_CFG",
     "ROBOT_CONTACT_SENSOR_NAME",
     "ROBOT_CONTACT_SENSOR_PRIM_PATH",
+    "ROBOT_IGNORED_CONTACT_BODY_NAMES",
+    "TARGET_CONTACT_FORCE_THRESHOLD",
+    "TARGET_CONTACT_SENSOR_NAME",
+    "TARGET_CONTACT_SENSOR_PRIM_PATH",
     "STATIC_COLLIDER_NAMES",
     "TEMPORARY_DISABLED_WORKSTATION_COLLIDER_NAMES",
     "WORKSTATION_COLLISION_GROUPS",
@@ -187,5 +214,6 @@ __all__ = [
     "disable_workstation_collision_prims",
     "get_collision_body_kind",
     "install_workstation_tabletop_scene_cfgs",
+    "make_target_contact_sensor_cfg",
     "make_workstation_tabletop_scene_cfgs",
 ]

@@ -30,6 +30,9 @@ from configs.asset import (
 from configs.collision_cfg import (
     ROBOT_CONTACT_FORCE_THRESHOLD,
     ROBOT_CONTACT_SENSOR_NAME,
+    ROBOT_IGNORED_CONTACT_BODY_NAMES,
+    TARGET_CONTACT_SENSOR_NAME,
+    make_target_contact_sensor_cfg,
 )
 from configs.scene_cfg import AuboTrainingSceneCfg, TRAINING_ENV_SPACING, TRAINING_REPLICATE_PHYSICS
 
@@ -451,7 +454,26 @@ class RewardsCfg:
         },
     )
 
-    # 9) collision penalty：base penalty is about -35 at 80 steps.
+    # 9) target contact penalty：Flange may lightly touch the active target,
+    # but repeated contact is still mildly discouraged. Actual penalty is about -4.
+    target_contact_penalty = RewardTerm(
+        func=AuboRewardFns.penalty_target_contact,
+        weight=-16.0,
+        params={
+            "sensor_cfg": ROBOT_CONTACT_SENSOR_NAME,
+            "force_threshold": ROBOT_CONTACT_FORCE_THRESHOLD,
+            "target_sensor_cfg": TARGET_CONTACT_SENSOR_NAME,
+            "target_asset_name": DEFAULT_RL_TARGET_ASSET_NAME,
+            "robot_asset_name": ROBOT_ASSET_NAME,
+            "ee_body_name": EE_BODY_NAME,
+            "allowed_body_names": (EE_BODY_NAME,),
+            "ignored_body_names": ROBOT_IGNORED_CONTACT_BODY_NAMES,
+            "target_contact_distance": 0.18,
+            "target_contact_hard_force_threshold": 75.0,
+        },
+    )
+
+    # 10) collision penalty：base penalty is about -35 at 80 steps.
     # Earlier collisions get about -12 extra actual reward penalty.
     collision_penalty = RewardTerm(
         func=AuboRewardFns.penalty_collision,
@@ -461,10 +483,18 @@ class RewardsCfg:
             "force_threshold": ROBOT_CONTACT_FORCE_THRESHOLD,
             "max_episode_steps": 80,
             "early_failure_scale": 0.342857,
+            "target_sensor_cfg": TARGET_CONTACT_SENSOR_NAME,
+            "target_asset_name": DEFAULT_RL_TARGET_ASSET_NAME,
+            "robot_asset_name": ROBOT_ASSET_NAME,
+            "ee_body_name": EE_BODY_NAME,
+            "allowed_body_names": (EE_BODY_NAME,),
+            "ignored_body_names": ROBOT_IGNORED_CONTACT_BODY_NAMES,
+            "target_contact_distance": 0.18,
+            "target_contact_hard_force_threshold": 75.0,
         },
     )
 
-    # 10) obstacle safety penalty：鼓励绕障留余量，不贴边走
+    # 11) obstacle safety penalty：鼓励绕障留余量，不贴边走
     # 暂且没有加入障碍部分
     # obstacle_safe = RewardTerm(
     #     func=AuboRewardFns.penalty_ee_obstacle_safe,
@@ -503,6 +533,14 @@ class TerminationsCfg:
         params={
             "sensor_cfg": ROBOT_CONTACT_SENSOR_NAME,
             "force_threshold": ROBOT_CONTACT_FORCE_THRESHOLD,
+            "target_sensor_cfg": TARGET_CONTACT_SENSOR_NAME,
+            "target_asset_name": DEFAULT_RL_TARGET_ASSET_NAME,
+            "robot_asset_name": ROBOT_ASSET_NAME,
+            "ee_body_name": EE_BODY_NAME,
+            "allowed_body_names": (EE_BODY_NAME,),
+            "ignored_body_names": ROBOT_IGNORED_CONTACT_BODY_NAMES,
+            "target_contact_distance": 0.18,
+            "target_contact_hard_force_threshold": 75.0,
         },
     )
     self_collision = None
@@ -561,8 +599,14 @@ def configure_task_target(
     env_cfg.rewards.ee_distance_exp.params["target_asset_name"] = target_asset_name
     env_cfg.rewards.success.params["target_asset_name"] = target_asset_name
     env_cfg.rewards.action_far_near.params["target_asset_name"] = target_asset_name
+    env_cfg.rewards.target_contact_penalty.params["target_asset_name"] = target_asset_name
+    env_cfg.rewards.collision_penalty.params["target_asset_name"] = target_asset_name
 
     env_cfg.terminations.goal_reached.params["goal_pos_name"] = target_asset_name
+    env_cfg.terminations.obstacle_collision.params["target_asset_name"] = target_asset_name
+
+    target_cfg = getattr(env_cfg.scene, target_asset_name)
+    env_cfg.scene.target_contact_sensor = make_target_contact_sensor_cfg(target_cfg.prim_path)
 
     if randomize_target_pose:
         env_cfg.events.reset_obstacle_pose = make_reset_target_pose_event(target_asset_name)

@@ -100,7 +100,11 @@ from configs.RLcfg import (
     configure_task_target,
 )
 from configs.asset import ROBOT_ASSET_NAME
-from configs.collision_cfg import ROBOT_CONTACT_FORCE_THRESHOLD, ROBOT_CONTACT_SENSOR_NAME
+from configs.collision_cfg import (
+    ROBOT_CONTACT_FORCE_THRESHOLD,
+    ROBOT_CONTACT_SENSOR_NAME,
+    ROBOT_IGNORED_CONTACT_BODY_NAMES,
+)
 from tools.contact import AuboContactToolFns, PhysxContactPairPrinter, enable_physx_contact_reports
 
 
@@ -128,6 +132,7 @@ class EpisodeRewardBreakdownCallback(BaseCallback):
         "action_l2",
         "action_rate_l2",
         "out_of_workspace_penalty",
+        "target_contact_penalty",
         "collision_penalty",
     )
     TERMINATION_TERMS = ("goal_reached", "time_out", "obstacle_collision", "self_collision", "ee_out_of_workspace")
@@ -276,11 +281,13 @@ class ContactSensorCollisionCallback(BaseCallback):
         *,
         sensor_name: str = ROBOT_CONTACT_SENSOR_NAME,
         force_threshold: float = ROBOT_CONTACT_FORCE_THRESHOLD,
+        ignored_body_names: tuple[str, ...] = ROBOT_IGNORED_CONTACT_BODY_NAMES,
     ):
         super().__init__()
         self.isaac_env = isaac_env
         self.sensor_name = sensor_name
         self.force_threshold = float(force_threshold)
+        self.ignored_body_names = tuple(ignored_body_names)
         self._active_envs: set[int] = set()
         self._missing_reported = False
         self._empty_reported = False
@@ -315,6 +322,11 @@ class ContactSensorCollisionCallback(BaseCallback):
         for env_id in sorted(new_envs):
             flat_index = int(flat_ids[env_id].detach().cpu())
             body_name = body_names[flat_index] if 0 <= flat_index < len(body_names) else f"flat_index={flat_index}"
+            illegal_body, illegal_force = self._max_non_ignored_body(
+                env_magnitude[env_id],
+                body_names,
+                self.ignored_body_names,
+            )
             episode_length_text = self._episode_length_text(episode_lengths, env_id)
             print(
                 "[TRAIN][collision_sensor] "
@@ -322,6 +334,9 @@ class ContactSensorCollisionCallback(BaseCallback):
                 f"env={env_id} "
                 f"robot_body={body_name} "
                 f"max_force={float(max_force[env_id].detach().cpu()):.6f} "
+                f"non_ignored_body={illegal_body} "
+                f"non_ignored_force={illegal_force:.6f} "
+                f"top_bodies={self._top_body_text(env_magnitude[env_id], body_names)} "
                 f"raw_shape={tuple(magnitude.shape)}"
                 f"{episode_length_text}",
                 flush=True,
@@ -357,6 +372,38 @@ class ContactSensorCollisionCallback(BaseCallback):
             return ""
         episode_length = int(episode_lengths[env_id].detach().cpu())
         return f" episode_length={episode_length}"
+
+    @staticmethod
+    def _max_non_ignored_body(
+        env_magnitude: torch.Tensor,
+        body_names: list[str],
+        ignored_body_names: tuple[str, ...],
+    ) -> tuple[str, float]:
+        ignored = set(ignored_body_names)
+        best_name = "none"
+        best_force = 0.0
+        for index, value in enumerate(env_magnitude.detach().flatten().cpu().tolist()):
+            body_name = body_names[index] if 0 <= index < len(body_names) else f"flat_index={index}"
+            if body_name in ignored:
+                continue
+            force = float(value)
+            if force > best_force:
+                best_name = body_name
+                best_force = force
+        return best_name, best_force
+
+    @staticmethod
+    def _top_body_text(env_magnitude: torch.Tensor, body_names: list[str], count: int = 3) -> str:
+        values = env_magnitude.detach().flatten()
+        if values.numel() == 0:
+            return "none"
+        top_count = min(int(count), int(values.numel()))
+        forces, ids = torch.topk(values, k=top_count)
+        parts = []
+        for force, body_id in zip(forces.cpu().tolist(), ids.cpu().tolist()):
+            body_name = body_names[int(body_id)] if 0 <= int(body_id) < len(body_names) else f"flat_index={int(body_id)}"
+            parts.append(f"{body_name}:{float(force):.6f}")
+        return ",".join(parts)
 
     @staticmethod
     def _body_names(sensor) -> list[str]:

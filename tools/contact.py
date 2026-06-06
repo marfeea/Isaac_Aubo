@@ -39,6 +39,90 @@ class AuboContactToolFns:
                 return torch.norm(tensor[..., :3], dim=-1)
         return None
 
+    @staticmethod
+    def extract_filtered_contact_magnitude(sensor) -> torch.Tensor | None:
+        """Return magnitudes from target-filtered contact matrices, if present."""
+        if sensor is None or not hasattr(sensor, "data"):
+            return None
+
+        for attr in ("force_matrix_w", "contact_force_matrix_w"):
+            tensor = getattr(sensor.data, attr, None)
+            if isinstance(tensor, torch.Tensor) and tensor.shape[-1] >= 3:
+                return torch.norm(tensor[..., :3], dim=-1)
+        return None
+
+    @staticmethod
+    def body_names(sensor) -> list[str]:
+        """Return body names exposed by the contact sensor, if available."""
+        for owner in (sensor, getattr(sensor, "data", None)):
+            names = getattr(owner, "body_names", None)
+            if names:
+                return list(names)
+        return []
+
+    @staticmethod
+    def extract_env_contact_magnitude(sensor, num_envs: int) -> torch.Tensor | None:
+        """Return contact magnitudes reshaped as (num_envs, contact_channels)."""
+        magnitude = AuboContactToolFns.extract_contact_magnitude(sensor)
+        if magnitude is None:
+            return None
+        return AuboContactToolFns.reshape_contact_magnitude(magnitude, num_envs)
+
+    @staticmethod
+    def extract_env_filtered_contact_magnitude(sensor, num_envs: int) -> torch.Tensor | None:
+        """Return filtered contact magnitudes reshaped as (num_envs, contact_channels)."""
+        magnitude = AuboContactToolFns.extract_filtered_contact_magnitude(sensor)
+        if magnitude is None:
+            return None
+        return AuboContactToolFns.reshape_contact_magnitude(magnitude, num_envs)
+
+    @staticmethod
+    def reshape_contact_magnitude(magnitude: torch.Tensor, num_envs: int) -> torch.Tensor:
+        """Reshape a contact magnitude tensor to (num_envs, contact_channels)."""
+        if magnitude.ndim == 0:
+            return magnitude.reshape(1, 1)
+        if magnitude.shape[0] == num_envs:
+            return magnitude.reshape(num_envs, -1)
+        if magnitude.shape[0] % num_envs == 0:
+            return magnitude.reshape(num_envs, -1)
+        return magnitude.reshape(1, -1)
+
+    @staticmethod
+    def extract_body_contact_magnitude(env, sensor_cfg: SceneEntityCfg | str, body_names: Sequence[str]) -> torch.Tensor | None:
+        """Return per-env max contact magnitude for selected sensor body names."""
+        sensor = AuboContactToolFns.get_optional_sensor(env, sensor_cfg)
+        env_magnitude = AuboContactToolFns.extract_env_contact_magnitude(sensor, env.num_envs)
+        if env_magnitude is None:
+            return None
+
+        sensor_body_names = AuboContactToolFns.body_names(sensor)
+        if not sensor_body_names:
+            return torch.amax(env_magnitude, dim=1)
+
+        wanted = set(body_names)
+        body_ids = [idx for idx, name in enumerate(sensor_body_names) if name in wanted and idx < env_magnitude.shape[1]]
+        if not body_ids:
+            return torch.zeros(env.num_envs, device=env.device)
+        return torch.amax(env_magnitude[:, body_ids], dim=1)
+
+    @staticmethod
+    def extract_non_body_contact_magnitude(env, sensor_cfg: SceneEntityCfg | str, body_names: Sequence[str]) -> torch.Tensor | None:
+        """Return per-env max contact magnitude for all sensor bodies except selected names."""
+        sensor = AuboContactToolFns.get_optional_sensor(env, sensor_cfg)
+        env_magnitude = AuboContactToolFns.extract_env_contact_magnitude(sensor, env.num_envs)
+        if env_magnitude is None:
+            return None
+
+        sensor_body_names = AuboContactToolFns.body_names(sensor)
+        if not sensor_body_names:
+            return torch.zeros(env.num_envs, device=env.device)
+
+        excluded = set(body_names)
+        body_ids = [idx for idx, name in enumerate(sensor_body_names) if name not in excluded and idx < env_magnitude.shape[1]]
+        if not body_ids:
+            return torch.zeros(env.num_envs, device=env.device)
+        return torch.amax(env_magnitude[:, body_ids], dim=1)
+
 
 def enable_physx_contact_reports(scene_or_stage, *, threshold: float = 0.0) -> int:
     """Enable PhysX contact report callbacks for physics prims in the stage."""

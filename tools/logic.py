@@ -212,10 +212,61 @@ class AuboRewardFns:
         force_threshold: float = 1e-6,
         max_episode_steps: int = 80,
         early_failure_scale: float = 0.342857,
+        target_sensor_cfg: SceneEntityCfg | str = "target_contact_sensor",
+        target_asset_name: str = TARGET_ASSET_NAME,
+        robot_asset_name: str = ROBOT_ASSET_NAME,
+        ee_body_name: str = EE_BODY_NAME,
+        allowed_body_names: Sequence[str] = (EE_BODY_NAME,),
+        ignored_body_names: Sequence[str] = (),
+        target_contact_distance: float = 0.18,
+        target_contact_hard_force_threshold: float = 75.0,
     ) -> torch.Tensor:
         """Return a larger penalty signal for earlier collision failures."""
-        failed = AuboTerminationFns._contact_done(env, sensor_cfg, force_threshold).float()
+        failed, _ = AuboRewardFns._collision_masks(
+            env,
+            sensor_cfg=sensor_cfg,
+            force_threshold=force_threshold,
+            target_sensor_cfg=target_sensor_cfg,
+            target_asset_name=target_asset_name,
+            robot_asset_name=robot_asset_name,
+            ee_body_name=ee_body_name,
+            allowed_body_names=allowed_body_names,
+            ignored_body_names=ignored_body_names,
+            target_contact_distance=target_contact_distance,
+            target_contact_hard_force_threshold=target_contact_hard_force_threshold,
+        )
+        failed = failed.float()
         return failed * AuboRewardFns._early_failure_multiplier(env, max_episode_steps, early_failure_scale)
+
+    @staticmethod
+    def penalty_target_contact(
+        env,
+        sensor_cfg: SceneEntityCfg | str = "contact_sensor",
+        force_threshold: float = 1e-6,
+        target_sensor_cfg: SceneEntityCfg | str = "target_contact_sensor",
+        target_asset_name: str = TARGET_ASSET_NAME,
+        robot_asset_name: str = ROBOT_ASSET_NAME,
+        ee_body_name: str = EE_BODY_NAME,
+        allowed_body_names: Sequence[str] = (EE_BODY_NAME,),
+        ignored_body_names: Sequence[str] = (),
+        target_contact_distance: float = 0.18,
+        target_contact_hard_force_threshold: float = 75.0,
+    ) -> torch.Tensor:
+        """Return 1.0 for allowed light contacts between Flange and the active target."""
+        _, allowed_target_contact = AuboRewardFns._collision_masks(
+            env,
+            sensor_cfg=sensor_cfg,
+            force_threshold=force_threshold,
+            target_sensor_cfg=target_sensor_cfg,
+            target_asset_name=target_asset_name,
+            robot_asset_name=robot_asset_name,
+            ee_body_name=ee_body_name,
+            allowed_body_names=allowed_body_names,
+            ignored_body_names=ignored_body_names,
+            target_contact_distance=target_contact_distance,
+            target_contact_hard_force_threshold=target_contact_hard_force_threshold,
+        )
+        return allowed_target_contact.float()
 
     @staticmethod
     def _positive_progress(env, buffer_name: str, dist: torch.Tensor) -> torch.Tensor:
@@ -241,9 +292,67 @@ class AuboRewardFns:
         remaining_fraction = torch.clamp(1.0 - step / float(max_steps), 0.0, 1.0)
         return 1.0 + float(early_failure_scale) * remaining_fraction
 
+    @staticmethod
+    def _collision_masks(
+        env,
+        *,
+        sensor_cfg: SceneEntityCfg | str,
+        force_threshold: float,
+        target_sensor_cfg: SceneEntityCfg | str,
+        target_asset_name: str,
+        robot_asset_name: str,
+        ee_body_name: str,
+        allowed_body_names: Sequence[str],
+        ignored_body_names: Sequence[str],
+        target_contact_distance: float,
+        target_contact_hard_force_threshold: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        allowed_body_force = AuboContactToolFns.extract_body_contact_magnitude(env, sensor_cfg, allowed_body_names)
+        if allowed_body_force is None:
+            allowed_body_force = torch.zeros(env.num_envs, device=env.device)
+        excluded_body_names = tuple(allowed_body_names) + tuple(ignored_body_names)
+        non_allowed_body_force = AuboContactToolFns.extract_non_body_contact_magnitude(
+            env,
+            sensor_cfg,
+            excluded_body_names,
+        )
+        if non_allowed_body_force is None:
+            non_allowed_body_force = torch.zeros(env.num_envs, device=env.device)
+
+        target_sensor = AuboContactToolFns.get_optional_sensor(env, target_sensor_cfg)
+        target_contact_magnitude = AuboContactToolFns.extract_env_filtered_contact_magnitude(target_sensor, env.num_envs)
+        if target_contact_magnitude is None:
+            target_force = torch.zeros(env.num_envs, device=env.device)
+            target_sensor_contact = allowed_body_force > force_threshold
+        else:
+            target_force = torch.amax(target_contact_magnitude, dim=1)
+            target_sensor_contact = target_force > force_threshold
+
+        ee_target_dist = AuboToolFns.ee_target_distance_w(env, robot_asset_name, ee_body_name, target_asset_name)
+        ee_near_target = ee_target_dist < float(target_contact_distance)
+        allowed_body_contact = allowed_body_force > force_threshold
+        non_allowed_body_contact = non_allowed_body_force > force_threshold
+        target_hard_contact = target_force > float(target_contact_hard_force_threshold)
+
+        allowed_target_contact = (
+            allowed_body_contact
+            & target_sensor_contact
+            & ee_near_target
+            & ~non_allowed_body_contact
+            & ~target_hard_contact
+        )
+        illegal_collision = non_allowed_body_contact | (allowed_body_contact & ~allowed_target_contact)
+        return illegal_collision, allowed_target_contact
+
 
 class AuboTerminationFns:
     """AUBO reaching / obstacle-aware reaching 终止逻辑。"""
+
+    _TERMINAL_REWARD_DEBUG_TERMS = (
+        "out_of_workspace_penalty",
+        "target_contact_penalty",
+        "collision_penalty",
+    )
 
     @staticmethod
     def goal_reached(
@@ -298,10 +407,30 @@ class AuboTerminationFns:
         force_threshold: float = 1e-6,
         log_termination: bool = False,
         termination_reason: str = "obstacle_collision",
+        target_sensor_cfg: SceneEntityCfg | str = "target_contact_sensor",
+        target_asset_name: str = TARGET_ASSET_NAME,
+        robot_asset_name: str = ROBOT_ASSET_NAME,
+        ee_body_name: str = EE_BODY_NAME,
+        allowed_body_names: Sequence[str] = (EE_BODY_NAME,),
+        ignored_body_names: Sequence[str] = (),
+        target_contact_distance: float = 0.18,
+        target_contact_hard_force_threshold: float = 75.0,
     ) -> torch.Tensor:
         """不同传感器 schema 下的非法碰撞终止。"""
         del body_names
-        done = AuboTerminationFns._contact_done(env, sensor_cfg, force_threshold)
+        done, _ = AuboRewardFns._collision_masks(
+            env,
+            sensor_cfg=sensor_cfg,
+            force_threshold=force_threshold,
+            target_sensor_cfg=target_sensor_cfg,
+            target_asset_name=target_asset_name,
+            robot_asset_name=robot_asset_name,
+            ee_body_name=ee_body_name,
+            allowed_body_names=allowed_body_names,
+            ignored_body_names=ignored_body_names,
+            target_contact_distance=target_contact_distance,
+            target_contact_hard_force_threshold=target_contact_hard_force_threshold,
+        )
         return AuboTerminationFns._print_done(env, done, termination_reason, log_termination)
 
     @staticmethod
@@ -362,15 +491,177 @@ class AuboTerminationFns:
                 episode_length = int(episode_lengths[int(env_id)].detach().cpu())
                 episode_length_text = f" episode_length={episode_length}"
 
+            reward_text = AuboTerminationFns._reward_text(env, int(env_id))
             print(
                 "[TRAIN][termination] "
                 f"timestep={step} "
                 f"env={int(env_id)} "
                 f"reason={reason}"
+                f"{reward_text}"
                 f"{episode_length_text}",
                 flush=True,
             )
         return done
+
+    @staticmethod
+    def _reward_text(env, env_id: int) -> str:
+        step_reward = AuboTerminationFns._first_indexed_scalar(env, env_id, ("reward_buf", "rew_buf"))
+        episode_rewards = AuboTerminationFns._reward_episode_sums(env, env_id)
+        active_rewards = AuboTerminationFns._reward_active_terms(env, env_id)
+        current_rewards = AuboTerminationFns._reward_current_terms(
+            env,
+            env_id,
+            AuboTerminationFns._TERMINAL_REWARD_DEBUG_TERMS,
+        )
+
+        parts = []
+        if step_reward is not None:
+            parts.append(f"step_reward={step_reward:.6f}")
+        if episode_rewards:
+            parts.append(f"episode_rewards={{ {episode_rewards} }}")
+        elif active_rewards:
+            parts.append(f"rewards={{ {active_rewards} }}")
+        if current_rewards:
+            parts.append(f"current_reward_terms={{ {current_rewards} }}")
+
+        if not parts:
+            return " rewards=unavailable"
+        return " " + " ".join(parts)
+
+    @staticmethod
+    def _reward_episode_sums(env, env_id: int) -> str:
+        reward_manager = getattr(env, "reward_manager", None)
+        if reward_manager is None:
+            return ""
+
+        for attr_name in ("_episode_sums", "episode_sums"):
+            episode_sums = getattr(reward_manager, attr_name, None)
+            if not isinstance(episode_sums, dict):
+                continue
+
+            parts = []
+            for term_name, values in episode_sums.items():
+                value = AuboTerminationFns._indexed_scalar(values, env_id)
+                if value is not None:
+                    parts.append(f"{term_name}={value:.6f}")
+            if parts:
+                return ", ".join(parts)
+        return ""
+
+    @staticmethod
+    def _reward_active_terms(env, env_id: int) -> str:
+        reward_manager = getattr(env, "reward_manager", None)
+        if reward_manager is None or not hasattr(reward_manager, "get_active_iterable_terms"):
+            return ""
+
+        try:
+            active_terms = reward_manager.get_active_iterable_terms(env_id)
+        except Exception:
+            return ""
+
+        parts = []
+        for term in active_terms:
+            if not isinstance(term, (list, tuple)) or len(term) < 2:
+                continue
+            term_name = str(term[0])
+            value = AuboTerminationFns._indexed_scalar(term[1], 0)
+            if value is not None:
+                parts.append(f"{term_name}={value:.6f}")
+        return ", ".join(parts)
+
+    @staticmethod
+    def _reward_current_terms(env, env_id: int, term_names: Sequence[str]) -> str:
+        cfgs = AuboTerminationFns._reward_term_cfgs(env, term_names)
+        if not cfgs:
+            return ""
+
+        step_dt = float(getattr(env, "step_dt", 1.0))
+        parts = []
+        for term_name in term_names:
+            term_cfg = cfgs.get(term_name)
+            if term_cfg is None:
+                continue
+
+            func = getattr(term_cfg, "func", None)
+            if func is None:
+                continue
+
+            params = getattr(term_cfg, "params", None) or {}
+            try:
+                raw = func(env, **params)
+            except Exception as exc:
+                parts.append(f"{term_name}=error:{type(exc).__name__}")
+                continue
+
+            raw_value = AuboTerminationFns._indexed_scalar(raw, env_id)
+            if raw_value is None:
+                continue
+
+            weight = float(getattr(term_cfg, "weight", 1.0))
+            weighted_value = raw_value * weight * step_dt
+            parts.append(f"{term_name}:raw={raw_value:.6f},weighted={weighted_value:.6f}")
+        return ", ".join(parts)
+
+    @staticmethod
+    def _reward_term_cfgs(env, term_names: Sequence[str]) -> dict[str, object]:
+        reward_manager = getattr(env, "reward_manager", None)
+        term_name_set = set(term_names)
+
+        if reward_manager is not None:
+            cfgs = getattr(reward_manager, "_term_cfgs", None)
+            if isinstance(cfgs, dict):
+                return {name: cfg for name, cfg in cfgs.items() if name in term_name_set}
+
+            names = getattr(reward_manager, "_term_names", None)
+            if names is not None and cfgs is not None:
+                mapped = {
+                    str(name): cfg
+                    for name, cfg in zip(list(names), list(cfgs))
+                    if str(name) in term_name_set
+                }
+                if mapped:
+                    return mapped
+
+        rewards_cfg = getattr(getattr(env, "cfg", None), "rewards", None)
+        if rewards_cfg is None:
+            return {}
+
+        return {
+            term_name: getattr(rewards_cfg, term_name)
+            for term_name in term_names
+            if getattr(rewards_cfg, term_name, None) is not None
+        }
+
+    @staticmethod
+    def _first_indexed_scalar(obj, env_id: int, attr_names: Sequence[str]) -> float | None:
+        for attr_name in attr_names:
+            value = AuboTerminationFns._indexed_scalar(getattr(obj, attr_name, None), env_id)
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _indexed_scalar(value, env_id: int) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 0:
+                return None
+            tensor = value.detach()
+            if tensor.ndim > 0 and 0 <= int(env_id) < int(tensor.shape[0]):
+                tensor = tensor[int(env_id)]
+            if tensor.numel() == 0:
+                return None
+            return float(tensor.float().mean().cpu())
+        if isinstance(value, (int, float, bool)):
+            return float(value)
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            if 0 <= int(env_id) < len(value):
+                return AuboTerminationFns._indexed_scalar(value[int(env_id)], 0)
+            return AuboTerminationFns._indexed_scalar(value[0], 0)
+        return None
 
     @staticmethod
     def _global_step(env) -> int:
