@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.assets import AssetBaseCfg, ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -5,27 +7,47 @@ from isaaclab.sensors.camera import CameraCfg
 
 from configs.asset import (
     AUBO_ROBOT_USD,
-    AUBO_WORLD_ROBOT_POS_1,
-    AUBO_WORLD_ROBOT_POS_2,
-    AUBO_WORLD_ROBOT_ROT,
-    CAMERA_INITIAL_POS,
-    CAMERA_INITIAL_ROT,
-    CAMERA_POSE_CONVENTION,
     ENV_ASSET_USD,
     ROBOT_ASSET_NAME,
     ROBOT_ASSET_NAME_2,
-    WORKSTATION_POS,
-    WORKSTATION_ROT,
-    WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS,
 )
+from configs.camera_cfg import CAMERA_SENSOR_POSE_CFG
 from configs.collision_cfg import ROBOT_CONTACT_SENSOR_CFG, make_target_contact_sensor_cfg
-from configs.place_cfg import WorkstationTabletopLoadCfg, install_workstation_tabletop_scene_cfgs
+from configs.place_cfg import (
+    Quat,
+    Vec3,
+    WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS,
+    WORKSTATION_POSE_CFG,
+    WorkstationTabletopLoadCfg,
+    install_workstation_tabletop_scene_cfgs,
+    workstation_local_to_world_pos,
+)
 
 import isaaclab.sim as sim_utils
 
 
 TRAINING_ENV_SPACING = 25
 TRAINING_REPLICATE_PHYSICS = True
+
+
+@dataclass(frozen=True)
+class AuboRobotPlacementCfg:
+    """AUBO base poses derived from the workstation placement."""
+
+    station_robot_pos_1: Vec3 = (0.034, -0.013, 0.816)
+    station_robot_pos_2: Vec3 = (-0.81, 0.21, 0.816)
+    world_rot: Quat = WORKSTATION_POSE_CFG.rot
+
+    @property
+    def world_pos_1(self) -> Vec3:
+        return workstation_local_to_world_pos(self.station_robot_pos_1)
+
+    @property
+    def world_pos_2(self) -> Vec3:
+        return workstation_local_to_world_pos(self.station_robot_pos_2)
+
+
+AUBO_ROBOT_PLACEMENT_CFG = AuboRobotPlacementCfg()
 
 
 AUBO_CONFIG = ArticulationCfg(
@@ -48,8 +70,8 @@ AUBO_CONFIG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=AUBO_WORLD_ROBOT_POS_1,
-        rot=AUBO_WORLD_ROBOT_ROT,
+        pos=AUBO_ROBOT_PLACEMENT_CFG.world_pos_1,
+        rot=AUBO_ROBOT_PLACEMENT_CFG.world_rot,
         joint_pos={
             "Joint1": 0.0,
             "Joint2": 0.0,
@@ -91,7 +113,7 @@ def make_aubo_cfg(robot_name: str, world_pos: tuple[float, float, float]) -> Art
         prim_path=f"{{ENV_REGEX_NS}}/{robot_name}",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=world_pos,
-            rot=AUBO_WORLD_ROBOT_ROT,
+            rot=AUBO_ROBOT_PLACEMENT_CFG.world_rot,
             joint_pos={
                 "Joint1": 0.0,
                 "Joint2": 0.0,
@@ -132,16 +154,16 @@ class AuboTrainingSceneCfg(InteractiveSceneCfg):
         locals(),
         WorkstationTabletopLoadCfg(
             prim_root="{ENV_REGEX_NS}/station",
-            station_pos=WORKSTATION_POS,
-            station_rot=WORKSTATION_ROT,
+            station_pos=WORKSTATION_POSE_CFG.pos,
+            station_rot=WORKSTATION_POSE_CFG.rot,
             include_missing_assets=False,
             strict_assets=False,
             create_parent_xforms=True,
         ),
     )
 
-    AUBObot = make_aubo_cfg(ROBOT_ASSET_NAME, AUBO_WORLD_ROBOT_POS_1)
-    AUBObot_2 = make_aubo_cfg(ROBOT_ASSET_NAME_2, AUBO_WORLD_ROBOT_POS_2)
+    AUBObot = make_aubo_cfg(ROBOT_ASSET_NAME, AUBO_ROBOT_PLACEMENT_CFG.world_pos_1)
+    AUBObot_2 = make_aubo_cfg(ROBOT_ASSET_NAME_2, AUBO_ROBOT_PLACEMENT_CFG.world_pos_2)
 
     robot_contact_sensor = ROBOT_CONTACT_SENSOR_CFG
     target_contact_sensor = make_target_contact_sensor_cfg(
@@ -165,9 +187,9 @@ class AuboTrainingSceneCfg(InteractiveSceneCfg):
         colorize_instance_id_segmentation=True,
         colorize_instance_segmentation=True,
         offset=CameraCfg.OffsetCfg(
-            pos=CAMERA_INITIAL_POS,
-            rot=CAMERA_INITIAL_ROT,
-            convention=CAMERA_POSE_CONVENTION,
+            pos=CAMERA_SENSOR_POSE_CFG.initial_pos,
+            rot=CAMERA_SENSOR_POSE_CFG.initial_rot,
+            convention=CAMERA_SENSOR_POSE_CFG.pose_convention,
         ),
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0,

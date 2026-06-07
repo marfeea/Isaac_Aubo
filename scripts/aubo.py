@@ -29,7 +29,8 @@ from isaaclab.controllers import DifferentialIKController, DifferentialIKControl
 from isaaclab.utils.math import subtract_frame_transforms
 
 
-from configs.asset import EE_BODY_NAME, VIEWPORT_CAMERA_EYE, VIEWPORT_CAMERA_TARGET
+from configs.asset import EE_BODY_NAME
+from configs.RenderCfg import TEST_RENDER_CFG
 from configs.RLcfg import StateOnlyObsCfg, ActionsCfg, EventCfg, AuboRLSceneCfg
 
 
@@ -157,7 +158,7 @@ def main():
     # Initialize the simulation context
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
-    sim.set_camera_view(VIEWPORT_CAMERA_EYE, VIEWPORT_CAMERA_TARGET)
+    sim.set_camera_view(TEST_RENDER_CFG.viewport_camera_eye, TEST_RENDER_CFG.viewport_camera_target)
     # Design scene
     scene_cfg = AuboRLSceneCfg(args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)

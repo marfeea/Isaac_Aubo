@@ -5,11 +5,15 @@ from typing import Any
 
 import isaaclab.sim as sim_utils
 
+from configs.place_cfg import Vec3, WORKSTATION_POSE_CFG
+
 
 @dataclass(frozen=True)
 class RenderCfg:
     """Project render settings matching the test scene viewport preset."""
 
+    viewport_camera_workstation_offset: Vec3 = (-1.5, 0.2, 1.0)
+    viewport_camera_forward_w: Vec3 = (1.0, 0.0, 0.0)
     rendering_mode: str = "quality"
     renderer: str = "RaytracedLighting"
     enable_translucency: bool = True
@@ -57,6 +61,23 @@ class RenderCfg:
             "/rtx/post/dlss/execMode": 1,
         }
     )
+
+    @property
+    def viewport_camera_eye(self) -> Vec3:
+        return (
+            WORKSTATION_POSE_CFG.pos[0] + self.viewport_camera_workstation_offset[0],
+            WORKSTATION_POSE_CFG.pos[1] + self.viewport_camera_workstation_offset[1],
+            WORKSTATION_POSE_CFG.pos[2] + self.viewport_camera_workstation_offset[2],
+        )
+
+    @property
+    def viewport_camera_target(self) -> Vec3:
+        eye = self.viewport_camera_eye
+        return (
+            eye[0] + self.viewport_camera_forward_w[0],
+            eye[1] + self.viewport_camera_forward_w[1],
+            eye[2] + self.viewport_camera_forward_w[2],
+        )
 
     def to_isaaclab(self) -> sim_utils.RenderCfg:
         """Build the IsaacLab RenderCfg used by SimulationCfg."""

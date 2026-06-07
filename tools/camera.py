@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 
-from configs.asset import CAMERA_INITIAL_POS, CAMERA_INITIAL_ROT, CAMERA_POSE_CONVENTION
+from configs.camera_cfg import CAMERA_SENSOR_POSE_CFG
 from tools.scene import AuboToolFns
 
 
@@ -55,14 +55,14 @@ class AuboCameraFns:
         rot: tuple[float, float, float, float] | None = None,
         env_ids=None,
         relative_to_env_origins: bool = True,
-        convention: str = CAMERA_POSE_CONVENTION,
+        convention: str = CAMERA_SENSOR_POSE_CFG.pose_convention,
     ) -> None:
         """设置一个或多个并行环境中的相机世界位姿。"""
         camera = AuboCameraFns.get_camera(scene, camera, camera_name)
         num_envs = AuboCameraFns.infer_num_envs(scene, camera)
         env_id_list = AuboCameraFns.normalize_env_ids(env_ids, num_envs)
-        pos = CAMERA_INITIAL_POS if pos is None else pos
-        rot = CAMERA_INITIAL_ROT if rot is None else rot
+        pos = CAMERA_SENSOR_POSE_CFG.initial_pos if pos is None else pos
+        rot = CAMERA_SENSOR_POSE_CFG.initial_rot if rot is None else rot
 
         device = getattr(camera, "device", None)
         if device is None and scene is not None and hasattr(scene, "device"):

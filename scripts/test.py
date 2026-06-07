@@ -64,15 +64,12 @@ from pxr import PhysicsSchemaTools, PhysxSchema, UsdPhysics, UsdUtils
 
 from configs.asset import (
     AUBO_ROBOT_USD,
-    CAMERA_INITIAL_POS,
-    CAMERA_INITIAL_ROT,
     EE_BODY_NAME,
     ROBOT_ASSET_NAME,
     TARGET_ASSET_NAME,
-    VIEWPORT_CAMERA_EYE,
-    VIEWPORT_CAMERA_TARGET,
-    WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS,
 )
+from configs.camera_cfg import CAMERA_SENSOR_POSE_CFG
+from configs.place_cfg import WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS
 from configs.RenderCfg import TEST_RENDER_CFG
 from configs.collision_cfg import (
     ROBOT_CONTACT_FORCE_THRESHOLD,
@@ -235,8 +232,8 @@ def print_camera_pose_report(scene: InteractiveScene, camera_name: str) -> None:
     camera = AuboCameraFns.get_camera(scene=scene, camera_name=camera_name)
     print("\n========== Camera Sensor Pose ==========")
     print(f"[INFO] Camera scene key       : {camera_name}")
-    print(f"[INFO] Configured pos         : {_format_tuple(CAMERA_INITIAL_POS)}")
-    print(f"[INFO] Configured rot         : {_format_tuple(CAMERA_INITIAL_ROT)}")
+    print(f"[INFO] Configured pos         : {_format_tuple(CAMERA_SENSOR_POSE_CFG.initial_pos)}")
+    print(f"[INFO] Configured rot         : {_format_tuple(CAMERA_SENSOR_POSE_CFG.initial_rot)}")
     try:
         actual_pos, actual_quat = _first_pose_from_asset(camera)
     except Exception as exc:
@@ -509,7 +506,7 @@ def main() -> None:
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device, render=TEST_RENDER_CFG.to_isaaclab())
     sim = sim_utils.SimulationContext(sim_cfg)
     TEST_RENDER_CFG.apply_runtime_settings()
-    sim.set_camera_view(VIEWPORT_CAMERA_EYE, VIEWPORT_CAMERA_TARGET)
+    sim.set_camera_view(TEST_RENDER_CFG.viewport_camera_eye, TEST_RENDER_CFG.viewport_camera_target)
 
     # 测试场景设置
     scene_cfg = TestSceneCfg(
