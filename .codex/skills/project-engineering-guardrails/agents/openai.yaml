@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目工程修改规范"
+  short_description: "约束本项目代码修改、模块边界、编码安全检查和研发日志清理流程"
+  default_prompt: "使用 $project-engineering-guardrails 按项目工程规范完成本次代码修改。"

@@ -1,31 +1,19 @@
-﻿import torch
-
-from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_from_matrix, subtract_frame_transforms
-
+﻿import isaaclab.envs.mdp as mdp
+from isaaclab.controllers import DifferentialIKControllerCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.envs.mdp.actions import ActionTerm, ActionTermCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
-from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import RewardTermCfg as RewardTerm
-from isaaclab.managers import TerminationTermCfg as DoneTerm
-
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.utils import configclass
 
-
-from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
-from isaaclab.envs.mdp.actions import ActionTerm, ActionTermCfg
-from tools.logic import (
-    reset_planning_obstacle_pose,
-    AuboRewardFns,
-    AuboTerminationFns,
-)
-from tools.scene import AuboToolFns
 from configs.asset import (
     EE_BODY_NAME,
     ROBOT_ASSET_NAME,
 )
-from configs.place_cfg import WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS, WORKSTATION_INTERACTIVE_PLACEMENT_CFG
 from configs.collision_cfg import (
     ROBOT_CONTACT_FORCE_THRESHOLD,
     ROBOT_CONTACT_SENSOR_NAME,
@@ -33,10 +21,15 @@ from configs.collision_cfg import (
     TARGET_CONTACT_SENSOR_NAME,
     make_target_contact_sensor_cfg,
 )
-from configs.scene_cfg import AuboTrainingSceneCfg, TRAINING_ENV_SPACING, TRAINING_REPLICATE_PHYSICS
-
-import isaaclab.envs.mdp as mdp
-
+from configs.place_cfg import WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS, WORKSTATION_INTERACTIVE_PLACEMENT_CFG
+from configs.scene_cfg import TRAINING_ENV_SPACING, TRAINING_REPLICATE_PHYSICS, AuboTrainingSceneCfg
+from tools.ik import AuboTaskSpaceIKAction
+from tools.logic import (
+    AuboRewardFns,
+    AuboTerminationFns,
+    reset_planning_obstacle_pose,
+)
+from tools.scene import AuboToolFns
 
 RL_TARGET_CENTER = WORKSTATION_INTERACTIVE_PLACEMENT_CFG.base_pos
 DEFAULT_RL_TARGET_ASSET_NAME = WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS[0]["scene_key"]
@@ -111,7 +104,7 @@ class StateOnlyObsCfg(ObsGroup):
         func=AuboToolFns.get_body_pos_w,
         params={
             "asset_cfg": SceneEntityCfg(ROBOT_ASSET_NAME),
-            "body_name": EE_BODY_NAME,   
+            "body_name": EE_BODY_NAME,
         },
     )
 
@@ -119,7 +112,7 @@ class StateOnlyObsCfg(ObsGroup):
         func=AuboToolFns.get_body_lin_vel_w,
         params={
             "asset_cfg": SceneEntityCfg(ROBOT_ASSET_NAME),
-            "body_name": EE_BODY_NAME,   
+            "body_name": EE_BODY_NAME,
         },
     )
 
@@ -133,7 +126,7 @@ class StateOnlyObsCfg(ObsGroup):
         func=AuboToolFns.ee_to_target_vec_w,
         params={
             "robot_asset_cfg": SceneEntityCfg(ROBOT_ASSET_NAME),
-            "ee_body_name": EE_BODY_NAME,   
+            "ee_body_name": EE_BODY_NAME,
             "target_asset_cfg": SceneEntityCfg(DEFAULT_RL_TARGET_ASSET_NAME),
         },
     )
@@ -152,157 +145,6 @@ class ObservationsCfg:
     """环境总观测配置"""
 
     policy: StateOnlyObsCfg = StateOnlyObsCfg()
-
-# 动作项逻辑
-class AuboTaskSpaceIKAction(ActionTerm):
-    """将3维任务空间位移动作映射为关节位置目标，姿态自动朝向目标点。
-    action = [dx, dy, dz]
-    """
-
-    cfg: "AuboTaskSpaceIKActionCfg"
-
-    def __init__(self, cfg: "AuboTaskSpaceIKActionCfg", env):
-        
-        super().__init__(cfg, env)
-
-        self.robot = env.scene[cfg.asset_name]
-        self.target_asset_name = cfg.target_asset_name
-
-        self.entity_cfg = SceneEntityCfg(
-            cfg.asset_name,
-            joint_names=cfg.joint_names,
-            body_names=[cfg.body_name],
-        )
-        self.entity_cfg.resolve(env.scene)
-
-        self.joint_ids = self.entity_cfg.joint_ids
-        self.body_id = self.entity_cfg.body_ids[0]
-
-        # 对应官方tutorial里末端body jacobian索引常用 body_id - 1 处理
-        self.ee_jacobi_idx = self.body_id - 1
-
-        self._ik_controller = DifferentialIKController(
-            cfg.controller,
-            num_envs=env.num_envs,
-            device=self.robot.device,
-        )
-
-        self._raw_actions = torch.zeros((env.num_envs, cfg.action_dim), device=self.robot.device)
-        self._processed_actions = torch.zeros_like(self._raw_actions)
-
-    @property
-    def action_dim(self) -> int:
-        return self.cfg.action_dim
-
-    @property
-    def raw_actions(self) -> torch.Tensor:
-        return self._raw_actions
-
-    @property
-    def processed_actions(self) -> torch.Tensor:
-        return self._processed_actions
-
-    def process_actions(self, actions: torch.Tensor):
-        """解析策略输出."""
-        self._raw_actions[:] = actions
-        self._processed_actions[:] = actions
-
-        # 缩放位置增量
-        self._processed_actions[:, 0] *= self.cfg.pos_scale[0]
-        self._processed_actions[:, 1] *= self.cfg.pos_scale[1]
-        self._processed_actions[:, 2] *= self.cfg.pos_scale[2]
-
-        # 归一化四元数
-        # if self.cfg.normalize_quat:
-        #     quat = self._processed_actions[:, 3:7]
-        #     quat = quat / torch.clamp(torch.norm(quat, dim=-1, keepdim=True), min=1e-8)
-        #     self._processed_actions[:, 3:7] = quat
-
-    def compute_target_facing_quat_b(
-        self,
-        ee_target_pos_b: torch.Tensor,
-        goal_pos_b: torch.Tensor,
-    ) -> torch.Tensor:
-        """根据“目标末端位置->目标点”方向生成朝向四元数 (w, x, y, z).
-
-        AUBO USD 中 Flange 的局部 +X 轴指向法兰背面，因此这里让局部 -X
-        对准目标点，视觉上才是法兰正面朝向目标。
-        """
-        eps = 1e-6
-        device = ee_target_pos_b.device
-        dtype = ee_target_pos_b.dtype
-
-        face_dir = goal_pos_b - ee_target_pos_b
-        face_dir_norm = torch.norm(face_dir, dim=-1, keepdim=True)
-        default_face_dir = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype).view(1, 3)
-        face_dir = torch.where(
-            face_dir_norm > eps,
-            face_dir / torch.clamp(face_dir_norm, min=eps),
-            default_face_dir,
-        )
-
-        # Rotation matrix columns are the target frame axes expressed in base frame.
-        # Since Flange local +X points backward, local +X must point away from target.
-        x_axis = -face_dir
-
-        world_up = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 3).repeat(x_axis.shape[0], 1)
-        alt_up = torch.tensor([0.0, 1.0, 0.0], device=device, dtype=dtype).view(1, 3).repeat(x_axis.shape[0], 1)
-        near_parallel = torch.abs((x_axis * world_up).sum(dim=-1, keepdim=True)) > 0.999
-        up = torch.where(near_parallel, alt_up, world_up)
-
-        y_axis = torch.cross(up, x_axis, dim=-1)
-        y_axis = y_axis / torch.clamp(torch.norm(y_axis, dim=-1, keepdim=True), min=eps)
-
-        z_axis = torch.cross(x_axis, y_axis, dim=-1)
-        z_axis = z_axis / torch.clamp(torch.norm(z_axis, dim=-1, keepdim=True), min=eps)
-
-        rot_mats = torch.stack([x_axis, y_axis, z_axis], dim=-1)
-        target_quat_b = quat_from_matrix(rot_mats)
-
-        # 统一符号，减小跨步抖动
-        sign = torch.where(target_quat_b[:, :1] < 0.0, -1.0, 1.0)
-        return target_quat_b * sign
-
-    def apply_actions(self):
-        """执行IK并写入关节目标."""
-        jacobian = self.robot.root_physx_view.get_jacobians()[:, self.ee_jacobi_idx, :, self.joint_ids]
-        ee_pose_w = self.robot.data.body_pose_w[:, self.body_id]
-        root_pose_w = self.robot.data.root_pose_w
-        joint_pos = self.robot.data.joint_pos[:, self.joint_ids]
-
-        ee_pos_b, ee_quat_b = subtract_frame_transforms(
-            root_pose_w[:, 0:3],
-            root_pose_w[:, 3:7],
-            ee_pose_w[:, 0:3],
-            ee_pose_w[:, 3:7],
-        )
-
-        # 当前末端位置 + 位移增量
-        target_pos_b = ee_pos_b + self._processed_actions[:, 0:3]
-
-        goal_pos_w = AuboToolFns.get_root_pos_w(self._env, self.target_asset_name)
-        identity_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=goal_pos_w.dtype)
-        identity_quat_w[:, 0] = 1.0
-        goal_pos_b, _ = subtract_frame_transforms(
-            root_pose_w[:, 0:3],
-            root_pose_w[:, 3:7],
-            goal_pos_w,
-            identity_quat_w,
-        )
-
-        target_quat_b = self.compute_target_facing_quat_b(target_pos_b, goal_pos_b)
-
-        ik_commands = torch.cat([target_pos_b, target_quat_b], dim=-1)
-        self._ik_controller.set_command(ik_commands)
-
-        joint_pos_des = self._ik_controller.compute(
-            ee_pos_b,
-            ee_quat_b,
-            jacobian,
-            joint_pos,
-        )
-
-        self.robot.set_joint_position_target(joint_pos_des, joint_ids=self.joint_ids)
 
 # 动作配置类
 @configclass
@@ -556,7 +398,7 @@ class TerminationsCfg:
 # 训练环境类
 @configclass
 class AuboRLEnvCfg(ManagerBasedRLEnvCfg):
-    # 场景设置 
+    # 场景设置
     scene : AuboRLSceneCfg = AuboRLSceneCfg(
         num_envs=1,
         env_spacing=TRAINING_ENV_SPACING,

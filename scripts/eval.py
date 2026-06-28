@@ -66,6 +66,11 @@ parser.add_argument(
     help="Print env index and reason whenever an eval environment terminates.",
 )
 parser.add_argument(
+    "--no_log_ee_actions",
+    action="store_true",
+    help="Disable per-step end-effector and action XYZ logging in world coordinates.",
+)
+parser.add_argument(
     "--interactive_viewer",
     action="store_true",
     help="Periodically pump the Isaac Sim UI during evaluation.",
@@ -95,7 +100,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper
 
 from configs.RLcfg import AuboRLEnvCfg, DEFAULT_RL_TARGET_ASSET_NAME, configure_task_target
-from configs.asset import ROBOT_ASSET_NAME
+from configs.asset import EE_BODY_NAME, ROBOT_ASSET_NAME
 from configs.collision_cfg import (
     ROBOT_CONTACT_FORCE_THRESHOLD,
     ROBOT_CONTACT_SENSOR_NAME,
@@ -111,6 +116,110 @@ TERMINATION_TERMS = (
     "self_collision",
     "ee_out_of_workspace",
 )
+
+
+def format_xyz(value, precision: int = 6) -> str:
+    if isinstance(value, torch.Tensor):
+        values = value.detach().flatten().cpu().tolist()
+    else:
+        values = list(value)
+    return "(" + ", ".join(f"{float(item):.{precision}f}" for item in values[:3]) + ")"
+
+
+def rotate_vec_by_quat_wxyz(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    """Rotate a vector by a quaternion in Isaac Lab's (w, x, y, z) convention."""
+    quat_vec = quat[:, 1:4]
+    quat_w = quat[:, 0:1]
+    uv = torch.cross(quat_vec, vec, dim=-1)
+    uuv = torch.cross(quat_vec, uv, dim=-1)
+    return vec + 2.0 * (quat_w * uv + uuv)
+
+
+class EvalEEActionWorldLogger:
+    """Convert the active task-space action into world XYZ and print per-step motion."""
+
+    def __init__(
+        self,
+        isaac_env,
+        *,
+        robot_asset_name: str = ROBOT_ASSET_NAME,
+        ee_body_name: str = EE_BODY_NAME,
+        pos_scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    ):
+        self.isaac_env = isaac_env
+        self.robot_asset_name = robot_asset_name
+        self.ee_body_name = ee_body_name
+        self.robot = isaac_env.scene[robot_asset_name]
+        body_ids = self.robot.find_bodies(ee_body_name)[0]
+        if len(body_ids) == 0:
+            raise ValueError(f"Body '{ee_body_name}' not found in robot asset '{robot_asset_name}'.")
+        self.body_id = int(body_ids[0])
+        self.pos_scale = torch.tensor(pos_scale, dtype=torch.float32, device=isaac_env.device).view(1, 3)
+
+    def snapshot(self, actions) -> dict[str, torch.Tensor]:
+        raw_action = self._actions_tensor(actions)
+        scaled_action_b = raw_action[:, 0:3] * self.pos_scale.to(device=raw_action.device, dtype=raw_action.dtype)
+
+        root_pose_w = self.robot.data.root_pose_w
+        root_quat_w = root_pose_w[:, 3:7]
+        ee_pos_w = self.ee_pos_w()
+        action_delta_w = rotate_vec_by_quat_wxyz(root_quat_w, scaled_action_b)
+
+        return {
+            "raw_action": raw_action.detach().clone(),
+            "scaled_action_b": scaled_action_b.detach().clone(),
+            "ee_before_w": ee_pos_w.detach().clone(),
+            "action_delta_w": action_delta_w.detach().clone(),
+            "target_pos_w": (ee_pos_w + action_delta_w).detach().clone(),
+        }
+
+    def ee_pos_w(self) -> torch.Tensor:
+        return self.robot.data.body_pose_w[:, self.body_id, 0:3]
+
+    def print_step(self, step: int, snapshot: dict[str, torch.Tensor], dones=None) -> None:
+        ee_after_w = self.ee_pos_w().detach().clone()
+        actual_delta_w = ee_after_w - snapshot["ee_before_w"]
+        delta_error_w = actual_delta_w - snapshot["action_delta_w"]
+        dones_list = self._dones_list(dones)
+
+        for env_id in range(self.isaac_env.num_envs):
+            done_text = ""
+            if dones_list is not None and env_id < len(dones_list):
+                done_text = f" done={bool(dones_list[env_id])}"
+            print(
+                "[Eval][ee_action_w] "
+                f"step={step} "
+                f"env={env_id} "
+                f"ee_w={format_xyz(snapshot['ee_before_w'][env_id])} "
+                f"action_w_xyz={format_xyz(snapshot['action_delta_w'][env_id])} "
+                f"target_w={format_xyz(snapshot['target_pos_w'][env_id])} "
+                f"ee_after_w={format_xyz(ee_after_w[env_id])} "
+                f"actual_delta_w={format_xyz(actual_delta_w[env_id])} "
+                f"delta_error_w={format_xyz(delta_error_w[env_id])} "
+                f"raw_action={format_xyz(snapshot['raw_action'][env_id])} "
+                f"scaled_action_base={format_xyz(snapshot['scaled_action_b'][env_id])}"
+                f"{done_text}",
+                flush=True,
+            )
+
+    def _actions_tensor(self, actions) -> torch.Tensor:
+        tensor = torch.as_tensor(actions, dtype=torch.float32, device=self.isaac_env.device)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        if tensor.shape[0] != self.isaac_env.num_envs:
+            tensor = tensor.reshape(self.isaac_env.num_envs, -1)
+        return tensor
+
+    @staticmethod
+    def _dones_list(dones):
+        if dones is None:
+            return None
+        if isinstance(dones, torch.Tensor):
+            return dones.detach().cpu().tolist()
+        try:
+            return list(dones)
+        except TypeError:
+            return [dones]
 
 
 class EvalContactSensorLogger:
@@ -283,6 +392,7 @@ def print_eval_summary(env_cfg: AuboRLEnvCfg, model_path: Path, target_asset_nam
         "deterministic": args_cli.deterministic,
         "log_collisions": args_cli.log_collisions,
         "log_terminations": args_cli.log_terminations,
+        "log_ee_actions": not args_cli.no_log_ee_actions,
         "interactive_viewer": args_cli.interactive_viewer and not getattr(args_cli, "headless", False),
         "sb3_fast_variant": False,
     }.items():
@@ -362,6 +472,14 @@ def main() -> None:
     contact_printer = None
     try:
         isaac_env = ManagerBasedRLEnv(cfg=env_cfg)
+        ee_action_logger = None
+        if not args_cli.no_log_ee_actions:
+            ee_action_logger = EvalEEActionWorldLogger(
+                isaac_env,
+                robot_asset_name=env_cfg.actions.task_space_ik.asset_name,
+                ee_body_name=env_cfg.actions.task_space_ik.body_name,
+                pos_scale=env_cfg.actions.task_space_ik.pos_scale,
+            )
         contact_sensor_logger = None
         if args_cli.log_collisions:
             enable_physx_contact_reports(isaac_env.scene)
@@ -392,9 +510,12 @@ def main() -> None:
                 break
 
             actions, _ = model.predict(obs, deterministic=args_cli.deterministic)
+            ee_action_snapshot = ee_action_logger.snapshot(actions) if ee_action_logger is not None else None
             obs, rewards, dones, infos = env.step(actions)
             step += 1
 
+            if ee_action_logger is not None and ee_action_snapshot is not None:
+                ee_action_logger.print_step(step, ee_action_snapshot, dones)
             if contact_printer is not None:
                 contact_printer.set_step(step)
             if contact_sensor_logger is not None:
