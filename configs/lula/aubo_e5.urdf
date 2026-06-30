@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  该文件从 AUBOE5.urdf 提取运动学链。原文件的关节 velocity 均为 0，
+  Lula 会拒绝加载，因此这里使用项目仿真执行器的 3.14 rad/s 上限。
+-->
+<robot name="AUBO_E5_Lula">
+  <link name="AUBO_E5"/>
+  <link name="Base_Link"/>
+  <link name="Link_01"/>
+  <link name="Link_02"/>
+  <link name="Link_03"/>
+  <link name="Link_04"/>
+  <link name="Link_05"/>
+  <link name="AUBO_E5_Flange"/>
+
+  <joint name="Root_Joint" type="fixed">
+    <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+    <parent link="AUBO_E5"/>
+    <child link="Base_Link"/>
+  </joint>
+
+  <joint name="Joint1" type="revolute">
+    <origin xyz="0.0000784 0.0000151 0.0640635" rpy="0.0 0.0 0.0"/>
+    <parent link="Base_Link"/>
+    <child link="Link_01"/>
+    <axis xyz="0.0 0.0 1.0"/>
+    <limit lower="-3.0543262" upper="3.0543262" effort="2400.0" velocity="3.14"/>
+  </joint>
+
+  <joint name="Joint2" type="revolute">
+    <origin xyz="-0.061865 0.0 0.0784497" rpy="0.0 0.0 0.0"/>
+    <parent link="Link_01"/>
+    <child link="Link_02"/>
+    <axis xyz="1.0 0.0 0.0"/>
+    <limit lower="-3.0543262" upper="3.0543262" effort="2400.0" velocity="3.14"/>
+  </joint>
+
+  <joint name="Joint3" type="revolute">
+    <origin xyz="-0.0071188 0.0 0.4079251" rpy="0.0 0.0 0.0"/>
+    <parent link="Link_02"/>
+    <child link="Link_03"/>
+    <axis xyz="1.0 0.0 0.0"/>
+    <limit lower="-3.0543262" upper="3.0543262" effort="2400.0" velocity="3.14"/>
+  </joint>
+
+  <joint name="Joint4" type="revolute">
+    <origin xyz="-0.0028194 0.0 0.3757994" rpy="0.0 0.0 0.0"/>
+    <parent link="Link_03"/>
+    <child link="Link_04"/>
+    <axis xyz="1.0 0.0 0.0"/>
+    <limit lower="-3.0543262" upper="3.0543262" effort="2400.0" velocity="3.14"/>
+  </joint>
+
+  <joint name="Joint5" type="revolute">
+    <origin xyz="-0.0485087 -0.0000002 0.0544221" rpy="0.0 0.0 0.0"/>
+    <parent link="Link_04"/>
+    <child link="Link_05"/>
+    <axis xyz="0.0 0.0 1.0"/>
+    <limit lower="-3.0543262" upper="3.0543262" effort="2400.0" velocity="3.14"/>
+  </joint>
+
+  <joint name="Link_05_Flange" type="revolute">
+    <origin xyz="-0.0540166 0.0000002 0.0480781" rpy="0.0 0.0 0.0"/>
+    <parent link="Link_05"/>
+    <child link="AUBO_E5_Flange"/>
+    <axis xyz="1.0 0.0 0.0"/>
+    <limit lower="-3.0543262" upper="3.0543262" effort="2400.0" velocity="3.14"/>
+  </joint>
+</robot>

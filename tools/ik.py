@@ -4,11 +4,11 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from isaaclab.controllers import DifferentialIKController
 from isaaclab.envs.mdp.actions import ActionTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_from_matrix, subtract_frame_transforms
 
+from tools.lula_ik import AuboLulaIKController
 from tools.scene import AuboToolFns
 
 if TYPE_CHECKING:
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class AuboTaskSpaceIKAction(ActionTerm):
-    """将4 Hz任务空间增量转换为固定目标，并以物理频率闭环求解关节目标。"""
+    """将4 Hz任务空间增量转换为固定目标，并通过 Lula 输出关节目标。"""
 
     cfg: AuboTaskSpaceIKActionCfg
 
@@ -30,16 +30,14 @@ class AuboTaskSpaceIKAction(ActionTerm):
             cfg.asset_name,
             joint_names=cfg.joint_names,
             body_names=[cfg.body_name],
+            preserve_order=True,
         )
         self.entity_cfg.resolve(env.scene)
 
         self.joint_ids = self.entity_cfg.joint_ids
         self.body_id = self.entity_cfg.body_ids[0]
 
-        # 固定基座机器人的 PhysX Jacobian 不包含基座刚体，因此索引需要减一。
-        self.ee_jacobi_idx = self.body_id - 1
-
-        self._ik_controller = DifferentialIKController(
+        self._ik_controller = AuboLulaIKController(
             cfg.controller,
             num_envs=env.num_envs,
             device=self.robot.device,
@@ -66,6 +64,11 @@ class AuboTaskSpaceIKAction(ActionTerm):
     def target_pose_b(self) -> torch.Tensor:
         """返回当前策略步缓存的机器人根坐标系目标位姿。"""
         return self._target_pose_b
+
+    @property
+    def ik_success(self) -> torch.Tensor:
+        """返回每个环境最近一次 Lula IK 是否收敛。"""
+        return self._ik_controller.last_success
 
     def process_actions(self, actions: torch.Tensor) -> None:
         """每个环境步处理一次动作，并缓存该控制周期内不变的末端目标。"""
@@ -101,24 +104,9 @@ class AuboTaskSpaceIKAction(ActionTerm):
         self._ik_controller.set_command(self._target_pose_b)
 
     def apply_actions(self) -> None:
-        """每个物理步朝缓存的固定目标重新求解，并写入关节位置目标。"""
-        jacobian = self.robot.root_physx_view.get_jacobians()[:, self.ee_jacobi_idx, :, self.joint_ids]
-        ee_pose_w = self.robot.data.body_pose_w[:, self.body_id]
-        root_pose_w = self.robot.data.root_pose_w
+        """每个物理步向缓存的 Lula 关节解推进，并写入关节位置目标。"""
         joint_pos = self.robot.data.joint_pos[:, self.joint_ids]
-
-        ee_pos_b, ee_quat_b = subtract_frame_transforms(
-            root_pose_w[:, 0:3],
-            root_pose_w[:, 3:7],
-            ee_pose_w[:, 0:3],
-            ee_pose_w[:, 3:7],
-        )
-        joint_pos_des = self._ik_controller.compute(
-            ee_pos_b,
-            ee_quat_b,
-            jacobian,
-            joint_pos,
-        )
+        joint_pos_des = self._ik_controller.compute(joint_pos=joint_pos)
         self.robot.set_joint_position_target(joint_pos_des, joint_ids=self.joint_ids)
 
     def reset(self, env_ids=None) -> None:

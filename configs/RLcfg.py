@@ -1,5 +1,4 @@
 ﻿import isaaclab.envs.mdp as mdp
-from isaaclab.controllers import DifferentialIKControllerCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mdp.actions import ActionTerm, ActionTermCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -21,6 +20,7 @@ from configs.collision_cfg import (
     TARGET_CONTACT_SENSOR_NAME,
     make_target_contact_sensor_cfg,
 )
+from configs.lula_cfg import AuboLulaIKControllerCfg
 from configs.place_cfg import WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS, WORKSTATION_INTERACTIVE_PLACEMENT_CFG
 from configs.scene_cfg import TRAINING_ENV_SPACING, TRAINING_REPLICATE_PHYSICS, AuboTrainingSceneCfg
 from tools.ik import AuboTaskSpaceIKAction
@@ -155,7 +155,7 @@ class AuboTaskSpaceIKActionCfg(ActionTermCfg):
 
     asset_name: str = ROBOT_ASSET_NAME
     target_asset_name: str = DEFAULT_RL_TARGET_ASSET_NAME
-    joint_names: list[str] = ["Joint.*", "Flange"]
+    joint_names: list[str] = ["Joint1", "Joint2", "Joint3", "Joint4", "Joint5", "Flange"]
     body_name: str = EE_BODY_NAME
 
     # 暂且更改为三维 dx dy dz
@@ -167,12 +167,8 @@ class AuboTaskSpaceIKActionCfg(ActionTermCfg):
     # 是否将后4维归一化为单位四元数
     normalize_quat: bool = True
 
-    # IK控制器配置
-    controller: DifferentialIKControllerCfg = DifferentialIKControllerCfg(
-        command_type="pose",
-        use_relative_mode=False,
-        ik_method="dls",
-    )
+    # Lula IK 控制器配置；输入仍为根坐标系绝对目标位姿，输出仍为关节位置目标。
+    controller: AuboLulaIKControllerCfg = AuboLulaIKControllerCfg()
 
 # 动作注册类
 @configclass
@@ -182,7 +178,7 @@ class ActionsCfg:
     task_space_ik = AuboTaskSpaceIKActionCfg(
         asset_name=ROBOT_ASSET_NAME,
         target_asset_name=DEFAULT_RL_TARGET_ASSET_NAME,
-        joint_names=["Joint.*", "Flange"],
+        joint_names=["Joint1", "Joint2", "Joint3", "Joint4", "Joint5", "Flange"],
         body_name=EE_BODY_NAME,
         pos_scale=(0.05, 0.05, 0.05),
         normalize_quat=True,

@@ -1,0 +1,21 @@
+# AUBO E5 的 Lula 运动学描述。关节名称来自外部 AUBOE5.urdf。
+api_version: 1.0
+
+cspace:
+  - Joint1
+  - Joint2
+  - Joint3
+  - Joint4
+  - Joint5
+  - Link_05_Flange
+
+root_link: AUBO_E5
+subtree_root_link: Base_Link
+
+default_q: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+acceleration_limits: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+jerk_limits: [1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
+
+cspace_to_urdf_rules: []
+composite_task_spaces: []
+collision_spheres: []
