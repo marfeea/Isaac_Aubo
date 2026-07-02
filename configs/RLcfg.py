@@ -33,6 +33,10 @@ from tools.scene import AuboToolFns
 
 RL_TARGET_CENTER = WORKSTATION_INTERACTIVE_PLACEMENT_CFG.base_pos
 DEFAULT_RL_TARGET_ASSET_NAME = WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS[0]["scene_key"]
+RL_SIM_DT = 1.0 / 120.0
+RL_DECIMATION = 30
+RL_EPISODE_LENGTH_S = 40.0
+RL_MAX_EPISODE_STEPS = round(RL_EPISODE_LENGTH_S / (RL_DECIMATION * RL_SIM_DT))
 # AUBObot root-frame bounds for Flange.
 RL_WORKSPACE = {
     "x": [-0.75, 0.75],
@@ -161,8 +165,19 @@ class AuboTaskSpaceIKActionCfg(ActionTermCfg):
     # 暂且更改为三维 dx dy dz
     action_dim: int = 3
 
-    # 位移缩放（米）
-    pos_scale: tuple[float, float, float] = (0.05, 0.05, 0.05)
+    # 位移缩放与每个控制周期的三维位移模长上限（米）。
+    pos_scale: tuple[float, float, float] = (0.01, 0.01, 0.01)
+    max_position_delta: float = 0.01
+
+    # 末端在 40 cm 内逐渐面对目标，在 20 cm 内完全面对目标。
+    orientation_blend_start_distance: float = 0.40
+    orientation_lock_distance: float = 0.20
+
+    # 进入渐进区时先使用宽松姿态容差，再收紧到 Lula 的正常容差。
+    orientation_blend_tolerance: float = 1.00
+
+    # 每个策略控制周期允许下发的最大姿态变化（弧度）。
+    max_orientation_step: float = 0.10
 
     # 是否将后4维归一化为单位四元数
     normalize_quat: bool = True
@@ -180,7 +195,6 @@ class ActionsCfg:
         target_asset_name=DEFAULT_RL_TARGET_ASSET_NAME,
         joint_names=["Joint1", "Joint2", "Joint3", "Joint4", "Joint5", "Flange"],
         body_name=EE_BODY_NAME,
-        pos_scale=(0.05, 0.05, 0.05),
         normalize_quat=True,
     )
 
@@ -247,7 +261,7 @@ class RewardsCfg:
             "far_eps": 0.50,
             "close_eps": 0.20,
             "w_far_move": 0.10,
-            "w_near_ineff": 1.20,
+            "w_near_ineff": 0.60,
             "delta_min_far": 0.020,
             "delta_min_near": 0.008,
             "near_action_norm_max": 0.45,
@@ -256,28 +270,28 @@ class RewardsCfg:
 
     # 5) step penalty：轻量但持续的时间代价。
     # IsaacLab 会按 step_dt=decimation*sim.dt=0.25 缩放 reward；
-    # weight=-0.5 对应每次决策约 -0.125，80 步 timeout 约 -10。
+    # weight=-0.25 对应每次决策约 -0.0625，160 步 timeout 约 -10。
     step_penalty = RewardTerm(
         func=AuboRewardFns.penalty_step,
-        weight=-0.5,
+        weight=-0.25,
         params={},
     )
 
     # 6) action magnitude penalty：抑制过猛动作。
     action_l2 = RewardTerm(
         func=AuboRewardFns.penalty_action_l2,
-        weight=-0.05,
+        weight=-0.025,
         params={},
     )
 
     # 7) action rate penalty：抑制高频抖动。
     action_rate_l2 = RewardTerm(
         func=AuboRewardFns.penalty_action_rate_l2,
-        weight=-0.20,
+        weight=-0.10,
         params={},
     )
 
-    # 8) out-of-workspace penalty：base penalty is about -25 at 80 steps.
+    # 8) out-of-workspace penalty：一次性终止惩罚不因回合步数翻倍而缩放。
     # Earlier failures get up to 48% extra penalty to avoid short bad rollouts.
     out_of_workspace_penalty = RewardTerm(
         func=AuboRewardFns.penalty_ee_out_of_workspace,
@@ -286,16 +300,16 @@ class RewardsCfg:
             "asset_cfg": ROBOT_ASSET_NAME,
             "ee_frame_name": EE_BODY_NAME,
             "workspace": RL_WORKSPACE,
-            "max_episode_steps": 80,
+            "max_episode_steps": RL_MAX_EPISODE_STEPS,
             "early_failure_scale": 0.48,
         },
     )
 
     # 9) target contact penalty：Flange may lightly touch the active target,
-    # but repeated contact is still mildly discouraged. Actual penalty is about -4.
+    # but repeated contact is still mildly discouraged. 回合步数翻倍后逐步权重减半。
     target_contact_penalty = RewardTerm(
         func=AuboRewardFns.penalty_target_contact,
-        weight=-16.0,
+        weight=-8.0,
         params={
             "sensor_cfg": ROBOT_CONTACT_SENSOR_NAME,
             "force_threshold": ROBOT_CONTACT_FORCE_THRESHOLD,
@@ -310,7 +324,7 @@ class RewardsCfg:
         },
     )
 
-    # 10) collision penalty：base penalty is about -35 at 80 steps.
+    # 10) collision penalty：一次性终止惩罚不因回合步数翻倍而缩放。
     # Earlier collisions get about -12 extra actual reward penalty.
     collision_penalty = RewardTerm(
         func=AuboRewardFns.penalty_collision,
@@ -318,7 +332,7 @@ class RewardsCfg:
         params={
             "sensor_cfg": ROBOT_CONTACT_SENSOR_NAME,
             "force_threshold": ROBOT_CONTACT_FORCE_THRESHOLD,
-            "max_episode_steps": 80,
+            "max_episode_steps": RL_MAX_EPISODE_STEPS,
             "early_failure_scale": 0.342857,
             "target_sensor_cfg": TARGET_CONTACT_SENSOR_NAME,
             "target_asset_name": DEFAULT_RL_TARGET_ASSET_NAME,
@@ -411,12 +425,12 @@ class AuboRLEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self) -> None:
         """Post initialization."""
         # general settings
-        self.decimation = 30
-        self.episode_length_s = 20
+        self.decimation = RL_DECIMATION
+        self.episode_length_s = RL_EPISODE_LENGTH_S
         # viewer settings
         self.viewer.eye = (8.0, 0.0, 5.0)
         # simulation settings
-        self.sim.dt = 1/ 120
+        self.sim.dt = RL_SIM_DT
         self.sim.render_interval = 4
 
 

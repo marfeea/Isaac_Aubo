@@ -43,6 +43,12 @@ class AuboLulaIKController:
         self._joint_solution = torch.zeros((self.num_envs, num_joints), device=device)
         self._command_dirty = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         self._last_success = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self._orientation_enabled = torch.ones(self.num_envs, dtype=torch.bool, device=device)
+        self._orientation_tolerance = torch.full(
+            (self.num_envs,),
+            float(cfg.orientation_tolerance),
+            device=device,
+        )
 
     @property
     def last_success(self) -> torch.Tensor:
@@ -54,7 +60,23 @@ class AuboLulaIKController:
         """返回未经过物理步增量限幅的最近关节解。"""
         return self._joint_solution
 
-    def set_command(self, command: torch.Tensor) -> None:
+    @property
+    def orientation_enabled(self) -> torch.Tensor:
+        """返回各环境当前是否启用姿态约束。"""
+        return self._orientation_enabled
+
+    @property
+    def orientation_tolerance(self) -> torch.Tensor:
+        """返回各环境当前使用的姿态容差。"""
+        return self._orientation_tolerance
+
+    def set_command(
+        self,
+        command: torch.Tensor,
+        *,
+        orientation_enabled: torch.Tensor | None = None,
+        orientation_tolerance: torch.Tensor | float | None = None,
+    ) -> None:
         """缓存根坐标系目标位姿，格式为 ``[x, y, z, qw, qx, qy, qz]``。"""
         expected_shape = (self.num_envs, self.action_dim)
         if tuple(command.shape) != expected_shape:
@@ -69,7 +91,38 @@ class AuboLulaIKController:
 
         self._command.copy_(command)
         self._command[:, 3:7] = quat / quat_norm
+        self._set_orientation_constraints(orientation_enabled, orientation_tolerance, command.dtype)
         self._command_dirty[:] = True
+
+    def _set_orientation_constraints(
+        self,
+        orientation_enabled: torch.Tensor | None,
+        orientation_tolerance: torch.Tensor | float | None,
+        dtype: torch.dtype,
+    ) -> None:
+        if orientation_enabled is None:
+            self._orientation_enabled[:] = True
+        else:
+            enabled = torch.as_tensor(orientation_enabled, device=self.device, dtype=torch.bool)
+            if tuple(enabled.shape) != (self.num_envs,):
+                raise ValueError(
+                    f"orientation_enabled shape must be {(self.num_envs,)}, got {tuple(enabled.shape)}."
+                )
+            self._orientation_enabled.copy_(enabled)
+
+        if orientation_tolerance is None:
+            self._orientation_tolerance[:] = float(self.cfg.orientation_tolerance)
+        else:
+            tolerance = torch.as_tensor(orientation_tolerance, device=self.device, dtype=dtype)
+            if tolerance.ndim == 0:
+                tolerance = tolerance.repeat(self.num_envs)
+            if tuple(tolerance.shape) != (self.num_envs,):
+                raise ValueError(
+                    f"orientation_tolerance shape must be {(self.num_envs,)}, got {tuple(tolerance.shape)}."
+                )
+            if not torch.isfinite(tolerance).all() or torch.any(tolerance <= 0.0):
+                raise ValueError("orientation_tolerance must contain finite positive values.")
+            self._orientation_tolerance.copy_(tolerance)
 
     def compute(
         self,
@@ -106,6 +159,32 @@ class AuboLulaIKController:
         )
         return joint_pos + joint_delta
 
+    def compute_forward_rotations(self, joint_pos: torch.Tensor) -> torch.Tensor:
+        """使用 Lula 模型计算给定关节状态下的末端旋转矩阵。"""
+        num_joints = self._joint_solution.shape[1]
+        if joint_pos.ndim != 2 or joint_pos.shape[1] != num_joints:
+            raise ValueError(
+                f"Lula FK joint position shape must be (N, {num_joints}), got {tuple(joint_pos.shape)}."
+            )
+
+        rotations = []
+        for positions in joint_pos.detach().cpu().numpy():
+            _, rotation = self._solver.compute_forward_kinematics(
+                frame_name=self.cfg.end_effector_frame_name,
+                joint_positions=positions,
+            )
+            if not np.isfinite(rotation).all():
+                raise ValueError("Lula FK returned a non-finite rotation matrix.")
+            rotations.append(rotation)
+
+        if not rotations:
+            return torch.empty((0, 3, 3), device=joint_pos.device, dtype=joint_pos.dtype)
+        return torch.as_tensor(
+            np.stack(rotations),
+            device=joint_pos.device,
+            dtype=joint_pos.dtype,
+        )
+
     def reset(self, env_ids=None) -> None:
         """清理指定环境的命令、关节解和收敛状态。"""
         resolved_ids = self._resolve_env_ids(env_ids)
@@ -114,22 +193,29 @@ class AuboLulaIKController:
         self._joint_solution[resolved_ids] = 0.0
         self._command_dirty[resolved_ids] = False
         self._last_success[resolved_ids] = False
+        self._orientation_enabled[resolved_ids] = True
+        self._orientation_tolerance[resolved_ids] = float(self.cfg.orientation_tolerance)
 
     def _solve_dirty_commands(self, env_ids: torch.Tensor, joint_pos: torch.Tensor) -> None:
         env_ids_cpu = env_ids.detach().cpu().tolist()
         command_cpu = self._command[env_ids].detach().cpu().numpy()
         joint_pos_cpu = joint_pos[env_ids].detach().cpu().numpy()
+        orientation_enabled_cpu = self._orientation_enabled[env_ids].detach().cpu().numpy()
+        orientation_tolerance_cpu = self._orientation_tolerance[env_ids].detach().cpu().numpy()
 
         for local_index, env_id in enumerate(env_ids_cpu):
             command = command_cpu[local_index]
             warm_start = joint_pos_cpu[local_index]
+            orientation_enabled = bool(orientation_enabled_cpu[local_index])
             solution, success = self._solver.compute_inverse_kinematics(
                 frame_name=self.cfg.end_effector_frame_name,
                 target_position=command[0:3],
-                target_orientation=command[3:7],
+                target_orientation=command[3:7] if orientation_enabled else None,
                 warm_start=warm_start,
                 position_tolerance=self.cfg.position_tolerance,
-                orientation_tolerance=self.cfg.orientation_tolerance,
+                orientation_tolerance=(
+                    float(orientation_tolerance_cpu[local_index]) if orientation_enabled else None
+                ),
             )
             solution_is_valid = bool(success) and bool(np.isfinite(solution).all())
             if solution_is_valid:

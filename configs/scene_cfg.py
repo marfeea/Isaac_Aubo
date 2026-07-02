@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from math import radians
 
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.assets import AssetBaseCfg, ArticulationCfg
@@ -28,6 +29,20 @@ import isaaclab.sim as sim_utils
 
 TRAINING_ENV_SPACING = 25
 TRAINING_REPLICATE_PHYSICS = True
+
+# 每回合重置使用的机械臂初始关节角。角度值是唯一调节入口，仿真值由此转换为弧度。
+AUBO_INITIAL_JOINT_POS_DEG = {
+    "Joint1": 0.0,
+    "Joint2": -30.0,
+    "Joint3": 70.0,
+    "Joint4": 45.0,
+    "Joint5": 90.0,
+    "Flange": 0.0,
+}
+AUBO_INITIAL_JOINT_POS = {
+    joint_name: radians(angle_deg)
+    for joint_name, angle_deg in AUBO_INITIAL_JOINT_POS_DEG.items()
+}
 
 
 @dataclass(frozen=True)
@@ -72,14 +87,7 @@ AUBO_CONFIG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         pos=AUBO_ROBOT_PLACEMENT_CFG.world_pos_1,
         rot=AUBO_ROBOT_PLACEMENT_CFG.world_rot,
-        joint_pos={
-            "Joint1": 0.0,
-            "Joint2": 0.0,
-            "Joint3": 0.0,
-            "Joint4": 0.0,
-            "Joint5": 0.0,
-            "Flange": 0.0,
-        },
+        joint_pos=dict(AUBO_INITIAL_JOINT_POS),
         joint_vel={".*": 0.0},
     ),
     actuators={
@@ -96,12 +104,12 @@ AUBO_CONFIG = ArticulationCfg(
                 "Flange": 6000.0,
             },
             damping={
-                "Joint1": 4000.0,
-                "Joint2": 4000.0,
-                "Joint3": 4000.0,
-                "Joint4": 4000.0,
-                "Joint5": 4000.0,
-                "Flange": 4000.0,
+                "Joint1": 600.0,
+                "Joint2": 600.0,
+                "Joint3": 600.0,
+                "Joint4": 600.0,
+                "Joint5": 600.0,
+                "Flange": 600.0,
             },
         ),
     },
@@ -114,14 +122,7 @@ def make_aubo_cfg(robot_name: str, world_pos: tuple[float, float, float]) -> Art
         init_state=ArticulationCfg.InitialStateCfg(
             pos=world_pos,
             rot=AUBO_ROBOT_PLACEMENT_CFG.world_rot,
-            joint_pos={
-                "Joint1": 0.0,
-                "Joint2": 0.0,
-                "Joint3": 0.0,
-                "Joint4": 0.0,
-                "Joint5": 0.0,
-                "Flange": 0.0,
-            },
+            joint_pos=dict(AUBO_INITIAL_JOINT_POS),
             joint_vel={".*": 0.0},
         ),
     )

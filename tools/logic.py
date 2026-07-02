@@ -133,7 +133,7 @@ class AuboRewardFns:
         far_eps: float = 0.5,
         close_eps: float = 0.2,
         w_far_move: float = 0.10,
-        w_near_ineff: float = 1.2,
+        w_near_ineff: float = 0.6,
         delta_min_far: float = 0.02,
         delta_min_near: float = 0.008,
         near_action_norm_max: float = 0.45,
@@ -194,7 +194,7 @@ class AuboRewardFns:
         asset_cfg: SceneEntityCfg | str = ROBOT_ASSET_NAME,
         ee_frame_name: str = EE_BODY_NAME,
         workspace: dict | None = None,
-        max_episode_steps: int = 80,
+        max_episode_steps: int = 160,
         early_failure_scale: float = 0.48,
     ) -> torch.Tensor:
         """Return a larger penalty signal for earlier workspace failures."""
@@ -210,7 +210,7 @@ class AuboRewardFns:
         env,
         sensor_cfg: SceneEntityCfg | str = "contact_sensor",
         force_threshold: float = 1e-6,
-        max_episode_steps: int = 80,
+        max_episode_steps: int = 160,
         early_failure_scale: float = 0.342857,
         target_sensor_cfg: SceneEntityCfg | str = "target_contact_sensor",
         target_asset_name: str = TARGET_ASSET_NAME,

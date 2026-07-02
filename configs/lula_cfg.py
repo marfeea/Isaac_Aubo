@@ -25,8 +25,8 @@ class AuboLulaIKControllerCfg:
         "Link_05_Flange",
     )
 
-    position_tolerance: float = 0.005
+    position_tolerance: float = 0.002
     orientation_tolerance: float = 0.05
 
     # 每个物理步允许变化的最大关节目标，避免非线性 IK 全量解直接形成目标跳变。
-    max_joint_delta: float | None = 0.025
+    max_joint_delta: float | None = 0.1

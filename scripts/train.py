@@ -49,6 +49,11 @@ parser.add_argument(
     help="Print env index and reason whenever a training environment terminates.",
 )
 parser.add_argument(
+    "--log_ik_steps",
+    action="store_true",
+    help="逐动作打印 IK 计划位移、实际位移和执行完成度。",
+)
+parser.add_argument(
     "--n_steps",
     type=int,
     default=1024,
@@ -260,6 +265,85 @@ class EpisodeRewardBreakdownCallback(BaseCallback):
         return None
 
 
+class IKDiagnosticsCallback(BaseCallback):
+    """按 rollout 记录 IK 收敛率、末端距离和分段朝向区间占比。"""
+
+    def __init__(self, action_term, *, print_steps: bool = False):
+        super().__init__()
+        self.action_term = action_term
+        self.print_steps = bool(print_steps)
+        self._reset_stats()
+
+    def _on_step(self) -> bool:
+        if self.print_steps:
+            self._print_step_execution()
+
+        distance = self.action_term.ee_goal_distance.detach()
+        finite = torch.isfinite(distance)
+        if not torch.any(finite):
+            return True
+
+        distance = distance[finite]
+        success = self.action_term.ik_success.detach()[finite]
+        start = float(self.action_term.cfg.orientation_blend_start_distance)
+        lock = float(self.action_term.cfg.orientation_lock_distance)
+
+        self._sample_count += int(distance.numel())
+        self._success_count += int(success.count_nonzero().cpu())
+        self._distance_sum += float(distance.sum().cpu())
+        self._distance_min = min(self._distance_min, float(distance.min().cpu()))
+        self._far_count += int((distance >= start).count_nonzero().cpu())
+        self._blend_count += int(((distance < start) & (distance > lock)).count_nonzero().cpu())
+        self._near_count += int((distance <= lock).count_nonzero().cpu())
+        return True
+
+    def _on_rollout_end(self) -> None:
+        if self._sample_count == 0:
+            return
+        denominator = float(self._sample_count)
+        self.logger.record("custom/ik_success_rate", self._success_count / denominator)
+        self.logger.record("custom/ee_goal_distance_mean", self._distance_sum / denominator)
+        self.logger.record("custom/ee_goal_distance_min", self._distance_min)
+        self.logger.record("custom/orientation_far_rate", self._far_count / denominator)
+        self.logger.record("custom/orientation_blend_rate", self._blend_count / denominator)
+        self.logger.record("custom/orientation_near_rate", self._near_count / denominator)
+        self._reset_stats()
+
+    def _reset_stats(self) -> None:
+        self._sample_count = 0
+        self._success_count = 0
+        self._distance_sum = 0.0
+        self._distance_min = float("inf")
+        self._far_count = 0
+        self._blend_count = 0
+        self._near_count = 0
+
+    def _print_step_execution(self) -> None:
+        planned, actual, completion, valid = self.action_term.get_step_execution_diagnostics()
+        planned = planned.detach().cpu()
+        actual = actual.detach().cpu()
+        completion = completion.detach().cpu()
+        valid = valid.detach().cpu()
+
+        for env_id in torch.nonzero(valid, as_tuple=False).flatten().tolist():
+            planned_text = self._format_vector(planned[env_id])
+            actual_text = self._format_vector(actual[env_id])
+            print(
+                "[训练][IK动作] "
+                f"动作步={self.n_calls} "
+                f"全局步数={self.num_timesteps} "
+                f"环境编号={env_id} "
+                f"IK计划增量位移（米）={planned_text} "
+                f"实际执行增量位移（米）={actual_text} "
+                f"执行完成度={float(completion[env_id]):.2f}%",
+                flush=True,
+            )
+
+    @staticmethod
+    def _format_vector(vector: torch.Tensor) -> str:
+        return f"({float(vector[0]):+.6f}, {float(vector[1]):+.6f}, {float(vector[2]):+.6f})"
+
+
 class ContactReportStepCallback(BaseCallback):
     """Keep PhysX contact-report prints aligned with SB3 timesteps."""
 
@@ -433,6 +517,7 @@ class ViewerPumpCallback(BaseCallback):
 
 def print_training_summary(env_cfg: AuboRLEnvCfg, target_asset_name: str) -> None:
     """Print the one startup log block required for a training run."""
+    action_cfg = env_cfg.actions.task_space_ik
     hyperparams = {
         "target_asset_name": target_asset_name,
         "num_envs": env_cfg.scene.num_envs,
@@ -441,6 +526,12 @@ def print_training_summary(env_cfg: AuboRLEnvCfg, target_asset_name: str) -> Non
         "n_steps": args_cli.n_steps,
         "rollout_timesteps": args_cli.n_steps * env_cfg.scene.num_envs,
         "batch_size": args_cli.batch_size,
+        "orientation_blend_start_distance": action_cfg.orientation_blend_start_distance,
+        "orientation_lock_distance": action_cfg.orientation_lock_distance,
+        "orientation_blend_tolerance": action_cfg.orientation_blend_tolerance,
+        "max_orientation_step": action_cfg.max_orientation_step,
+        "position_scale": action_cfg.pos_scale,
+        "max_position_delta": action_cfg.max_position_delta,
         **PPO_HYPERPARAMS,
         "progress_bar": args_cli.progress_bar,
         "camera_sensor": args_cli.enable_camera_sensor,
@@ -449,6 +540,7 @@ def print_training_summary(env_cfg: AuboRLEnvCfg, target_asset_name: str) -> Non
         "log_reward_breakdown": args_cli.log_reward_breakdown,
         "log_collisions": args_cli.log_collisions,
         "log_terminations": args_cli.log_terminations,
+        "逐动作IK日志": args_cli.log_ik_steps,
         "sb3_console_log": True,
         "sb3_log_interval": 1,
     }
@@ -516,9 +608,14 @@ def main():
     )
 
     curve_callback = EpisodeRewardBreakdownCallback(print_enabled=args_cli.log_reward_breakdown)
+    action_terms = getattr(isaac_env.action_manager, "_terms", {})
+    ik_action_term = action_terms.get("task_space_ik")
+    if ik_action_term is None:
+        raise RuntimeError("Unable to resolve the task_space_ik action term for IK diagnostics.")
     callback_items = [
         checkpoint_callback,
         curve_callback,
+        IKDiagnosticsCallback(ik_action_term, print_steps=args_cli.log_ik_steps),
     ]
     if contact_printer is not None:
         callback_items.append(ContactReportStepCallback(contact_printer))
