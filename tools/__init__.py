@@ -1,13 +1,16 @@
-"""AUBO project utility modules.
+"""AUBO 项目工具的稳定公开入口。"""
 
-The public classes are re-exported here so callers can import from either
-``tools`` or the legacy ``tool`` compatibility module.
-"""
+from __future__ import annotations
 
-from tools.camera import AuboCameraFns
-from tools.contact import AuboContactToolFns
-from tools.rl import AuboActionToolFns, AuboBufferToolFns
-from tools.scene import AuboToolFns
+from importlib import import_module
+
+_LAZY_EXPORTS = {
+    "AuboActionToolFns": ("tools.rl", "AuboActionToolFns"),
+    "AuboBufferToolFns": ("tools.rl", "AuboBufferToolFns"),
+    "AuboCameraFns": ("tools.camera", "AuboCameraFns"),
+    "AuboContactToolFns": ("tools.contact", "AuboContactToolFns"),
+    "AuboToolFns": ("tools.scene", "AuboToolFns"),
+}
 
 __all__ = [
     "AuboActionToolFns",
@@ -16,3 +19,14 @@ __all__ = [
     "AuboContactToolFns",
     "AuboToolFns",
 ]
+
+
+def __getattr__(name: str):
+    """仅在调用公开工具时加载 Torch/Isaac 依赖。"""
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module 'tools' has no attribute {name!r}")
+    module_name, attribute_name = target
+    value = getattr(import_module(module_name), attribute_name)
+    globals()[name] = value
+    return value

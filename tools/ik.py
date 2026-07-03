@@ -47,6 +47,7 @@ class AuboTaskSpaceIKAction(ActionTerm):
         self._processed_actions = torch.zeros_like(self._raw_actions)
         self._target_pose_b = torch.zeros((env.num_envs, 7), device=self.robot.device)
         self._target_pose_b[:, 3] = 1.0
+        self._joint_position_target = torch.zeros((env.num_envs, len(cfg.joint_names)), device=self.robot.device)
 
         self._blend_reference_quat_b = torch.zeros((env.num_envs, 4), device=self.robot.device)
         self._blend_reference_quat_b[:, 0] = 1.0
@@ -89,6 +90,11 @@ class AuboTaskSpaceIKAction(ActionTerm):
     def target_pose_b(self) -> torch.Tensor:
         """返回当前策略步缓存的机器人根坐标系目标位姿。"""
         return self._target_pose_b
+
+    @property
+    def joint_position_target(self) -> torch.Tensor:
+        """返回最近一次实际下发给关节位置控制器的目标。"""
+        return self._joint_position_target
 
     @property
     def ik_success(self) -> torch.Tensor:
@@ -220,6 +226,7 @@ class AuboTaskSpaceIKAction(ActionTerm):
         """每个物理步向缓存的 Lula 关节解推进，并写入关节位置目标。"""
         joint_pos = self.robot.data.joint_pos[:, self.joint_ids]
         joint_pos_des = self._ik_controller.compute(joint_pos=joint_pos)
+        self._joint_position_target.copy_(joint_pos_des)
         self.robot.set_joint_position_target(joint_pos_des, joint_ids=self.joint_ids)
 
     def reset(self, env_ids=None) -> None:
@@ -229,6 +236,7 @@ class AuboTaskSpaceIKAction(ActionTerm):
         self._processed_actions[cache_env_ids] = 0.0
         self._target_pose_b[cache_env_ids] = 0.0
         self._target_pose_b[cache_env_ids, 3] = 1.0
+        self._joint_position_target[cache_env_ids] = 0.0
         self._blend_reference_quat_b[cache_env_ids] = 0.0
         self._blend_reference_quat_b[cache_env_ids, 0] = 1.0
         self._last_command_quat_b[cache_env_ids] = 0.0

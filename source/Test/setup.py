@@ -17,8 +17,10 @@ EXTENSION_TOML_DATA = toml.load(os.path.join(EXTENSION_PATH, "config", "extensio
 
 # Minimum dependencies required prior to installation
 INSTALL_REQUIRES = [
-    # NOTE: Add dependencies
     "psutil",
+    "pyarrow>=15.0",
+    "zarr>=2.18,<3",
+    "numcodecs>=0.12",
 ]
 
 # Installation operation
