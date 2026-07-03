@@ -5,12 +5,17 @@ from dataclasses import dataclass
 from configs.place_cfg import Quat, Vec3, WORKSTATION_POSE_CFG
 
 
+CAMERA_SENSOR_SCENE_NAMES = ("camera_cfg", "camera_cfg_2", "camera_cfg_3")
+CAMERA_CAPTURE_INTERVAL_S = 10.0
+CAMERA_CAPTURE_OUTPUT_DIR = "data/test"
+
+
 @dataclass(frozen=True)
 class CameraSensorPoseCfg:
     """CameraSensor pose defaults relative to the workstation placement."""
 
-    workstation_offset: Vec3 = (-0.5, 0.0, 0.9)
-    initial_rot: Quat = (0.70711, 0.0, 0.70711, 0.0)
+    workstation_offset: Vec3 = (1.4, 0.0, 1.3)
+    initial_rot: Quat = (0.5, 0.5, 0.5, 0.5)
     pose_convention: str = "opengl"
 
     @property
@@ -23,3 +28,13 @@ class CameraSensorPoseCfg:
 
 
 CAMERA_SENSOR_POSE_CFG = CameraSensorPoseCfg()
+CAMERA_SENSOR_2_POSE_CFG = CameraSensorPoseCfg(
+    workstation_offset=(0.0, -0.8, 2.0),
+    initial_rot=(0.86603, 0.5, 0.0, 0.0),
+)
+CAMERA_SENSOR_3_POSE_CFG = CAMERA_SENSOR_POSE_CFG
+CAMERA_SENSOR_POSE_CFGS = {
+    "camera_cfg": CAMERA_SENSOR_POSE_CFG,
+    "camera_cfg_2": CAMERA_SENSOR_2_POSE_CFG,
+    "camera_cfg_3": CAMERA_SENSOR_3_POSE_CFG,
+}

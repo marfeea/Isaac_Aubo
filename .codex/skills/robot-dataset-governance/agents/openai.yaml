@@ -1,0 +1,4 @@
+interface:
+  display_name: "机器人数据集治理"
+  short_description: "约束机器人轨迹数据的采集、存储、转换、校验与训练读取逻辑"
+  default_prompt: "使用 $robot-dataset-governance 按项目数据规范实现或审查数据集相关更改。"

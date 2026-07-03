@@ -12,7 +12,7 @@ from configs.asset import (
     ROBOT_ASSET_NAME,
     ROBOT_ASSET_NAME_2,
 )
-from configs.camera_cfg import CAMERA_SENSOR_POSE_CFG
+from configs.camera_cfg import CAMERA_SENSOR_POSE_CFGS, CameraSensorPoseCfg
 from configs.collision_cfg import ROBOT_CONTACT_SENSOR_CFG, make_target_contact_sensor_cfg
 from configs.place_cfg import (
     Quat,
@@ -99,7 +99,7 @@ AUBO_CONFIG = ArticulationCfg(
                 "Joint1": 6000.0,
                 "Joint2": 6000.0,
                 "Joint3": 6000.0,
-                "Joint4": 8000.0,
+                "Joint4": 6000.0,
                 "Joint5": 6000.0,
                 "Flange": 6000.0,
             },
@@ -124,6 +124,38 @@ def make_aubo_cfg(robot_name: str, world_pos: tuple[float, float, float]) -> Art
             rot=AUBO_ROBOT_PLACEMENT_CFG.world_rot,
             joint_pos=dict(AUBO_INITIAL_JOINT_POS),
             joint_vel={".*": 0.0},
+        ),
+    )
+
+
+def make_camera_cfg(prim_name: str, pose_cfg: CameraSensorPoseCfg) -> CameraCfg:
+    """创建使用指定初始位姿的相机配置。"""
+    return CameraCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/{prim_name}",
+        update_period=0,
+        height=480,
+        width=640,
+        data_types=[
+            "rgb",
+            "distance_to_image_plane",
+            "normals",
+            "semantic_segmentation",
+            "instance_segmentation_fast",
+            "instance_id_segmentation_fast",
+        ],
+        colorize_semantic_segmentation=True,
+        colorize_instance_id_segmentation=True,
+        colorize_instance_segmentation=True,
+        offset=CameraCfg.OffsetCfg(
+            pos=pose_cfg.initial_pos,
+            rot=pose_cfg.initial_rot,
+            convention=pose_cfg.pose_convention,
+        ),
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 1.0e5),
         ),
     )
 
@@ -171,34 +203,9 @@ class AuboTrainingSceneCfg(InteractiveSceneCfg):
         f"{{ENV_REGEX_NS}}/station/interactive/{WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS[0]['name']}"
     )
 
-    camera_cfg = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/CameraSensor",
-        update_period=0,
-        height=480,
-        width=640,
-        data_types=[
-            "rgb",
-            "distance_to_image_plane",
-            "normals",
-            "semantic_segmentation",
-            "instance_segmentation_fast",
-            "instance_id_segmentation_fast",
-        ],
-        colorize_semantic_segmentation=True,
-        colorize_instance_id_segmentation=True,
-        colorize_instance_segmentation=True,
-        offset=CameraCfg.OffsetCfg(
-            pos=CAMERA_SENSOR_POSE_CFG.initial_pos,
-            rot=CAMERA_SENSOR_POSE_CFG.initial_rot,
-            convention=CAMERA_SENSOR_POSE_CFG.pose_convention,
-        ),
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.1, 1.0e5),
-        ),
-    )
+    camera_cfg = make_camera_cfg("CameraSensor", CAMERA_SENSOR_POSE_CFGS["camera_cfg"])
+    camera_cfg_2 = make_camera_cfg("CameraSensor_2", CAMERA_SENSOR_POSE_CFGS["camera_cfg_2"])
+    camera_cfg_3 = make_camera_cfg("CameraSensor_3", CAMERA_SENSOR_POSE_CFGS["camera_cfg_3"])
 
 
 def make_training_scene_cfg(num_envs: int = 1) -> AuboTrainingSceneCfg:

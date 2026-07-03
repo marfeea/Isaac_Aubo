@@ -11,7 +11,6 @@ This script is intentionally lightweight:
 
 import argparse
 import math
-from pathlib import Path
 
 import _bootstrap  # noqa: F401
 from isaaclab.app import AppLauncher
@@ -23,10 +22,7 @@ parser.add_argument("--cycle_steps", type=int, default=240, help="Simulation ste
 parser.add_argument("--print_every", type=int, default=120, help="Print live pose info every N steps. Use 0 to disable.")
 parser.add_argument("--ee_body_name", type=str, default=None, help="End-effector/flange body name to resolve.")
 parser.add_argument("--list_all", action="store_true", help="Print all joint/body names without truncation.")
-parser.add_argument("--camera_name", type=str, default="camera_cfg", help="Scene camera key used for test image capture.")
-parser.add_argument("--picture_dir", type=str, default=None, help="Image output directory. Defaults to <project>/picture.")
-parser.add_argument("--capture_after_seconds", type=float, default=5.0, help="Capture one camera image after this sim time.")
-parser.add_argument("--capture_data_type", type=str, default="rgb", help="Camera data output type to save.")
+parser.add_argument("--camera_name", type=str, default="camera_cfg", help="Scene camera key used for pose setup and reporting.")
 parser.add_argument(
     "--contact_print_every",
     type=int,
@@ -68,7 +64,7 @@ from configs.asset import (
     ROBOT_ASSET_NAME,
     TARGET_ASSET_NAME,
 )
-from configs.camera_cfg import CAMERA_SENSOR_POSE_CFG
+from configs.camera_cfg import CAMERA_SENSOR_POSE_CFGS, CAMERA_SENSOR_SCENE_NAMES
 from configs.place_cfg import WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS
 from configs.RenderCfg import TEST_RENDER_CFG
 from configs.collision_cfg import (
@@ -78,13 +74,10 @@ from configs.collision_cfg import (
     disable_workstation_collision_prims,
 )
 from tools.camera import AuboCameraFns
+from tools.rgbd_recorder import PeriodicRgbdRecorder
 from tools.contact import AuboContactToolFns
 from configs.Testcfg import TestSceneCfg
 from configs.scene_cfg import TRAINING_ENV_SPACING, TRAINING_REPLICATE_PHYSICS
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
 
 def _to_list(value) -> list:
     if value is None:
@@ -230,10 +223,11 @@ def print_workstation_interactive_report(scene: InteractiveScene) -> None:
 def print_camera_pose_report(scene: InteractiveScene, camera_name: str) -> None:
     """Print the configured and actual pose for the scene camera sensor."""
     camera = AuboCameraFns.get_camera(scene=scene, camera_name=camera_name)
+    pose_cfg = CAMERA_SENSOR_POSE_CFGS[camera_name]
     print("\n========== Camera Sensor Pose ==========")
     print(f"[INFO] Camera scene key       : {camera_name}")
-    print(f"[INFO] Configured pos         : {_format_tuple(CAMERA_SENSOR_POSE_CFG.initial_pos)}")
-    print(f"[INFO] Configured rot         : {_format_tuple(CAMERA_SENSOR_POSE_CFG.initial_rot)}")
+    print(f"[INFO] Configured pos         : {_format_tuple(pose_cfg.initial_pos)}")
+    print(f"[INFO] Configured rot         : {_format_tuple(pose_cfg.initial_rot)}")
     try:
         actual_pos, actual_quat = _first_pose_from_asset(camera)
     except Exception as exc:
@@ -428,7 +422,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
     next_idx = 1
     step_in_cycle = 0
     total_steps = 0
-    capture_done = False
+    rgbd_recorder = PeriodicRgbdRecorder(
+        scene=scene,
+        camera_names=CAMERA_SENSOR_SCENE_NAMES,
+        script_name="test",
+    )
 
     q_start = waypoints[current_idx].clone()
     q_goal = waypoints[next_idx].clone()
@@ -453,25 +451,9 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
         scene.update(sim_dt)
         contact_sensor_printer.update(total_steps + 1)
 
-        # 按仿真时间触发一次相机保存；env_ids=None 表示保存所有并行环境。
+        # 按仿真时间周期保存所有相机、所有并行环境的 RGB-D 数据。
         sim_time = (total_steps + 1) * sim_dt
-        if not capture_done and sim_time >= args_cli.capture_after_seconds:
-            capture_done = True
-            try:
-                image_paths = AuboCameraFns.save_camera_images(
-                    scene=scene,
-                    camera_name=args_cli.camera_name,
-                    output_dir=args_cli.picture_dir,
-                    root_dir=PROJECT_ROOT,
-                    data_type=args_cli.capture_data_type,
-                    env_ids=None,
-                    step=total_steps + 1,
-                )
-                print(f"[INFO] Saved {len(image_paths)} camera images:")
-                for image_path in image_paths:
-                    print(f"  {image_path}")
-            except Exception as exc:
-                print(f"[WARN] Failed to save camera image: {exc}")
+        rgbd_recorder.maybe_capture(step=total_steps + 1, sim_time_s=sim_time)
 
         # 定期打印第一套环境中的 robot root、末端和 target 位置，便于观察场景是否稳定。
         if args_cli.print_every > 0 and total_steps % args_cli.print_every == 0:

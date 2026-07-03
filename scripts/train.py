@@ -105,6 +105,7 @@ from configs.RLcfg import (
     configure_task_target,
 )
 from configs.asset import ROBOT_ASSET_NAME
+from configs.camera_cfg import CAMERA_SENSOR_SCENE_NAMES
 from configs.collision_cfg import (
     ROBOT_CONTACT_FORCE_THRESHOLD,
     ROBOT_CONTACT_SENSOR_NAME,
@@ -571,7 +572,8 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     if not args_cli.enable_camera_sensor:
-        env_cfg.scene.camera_cfg = None
+        for camera_name in CAMERA_SENSOR_SCENE_NAMES:
+            setattr(env_cfg.scene, camera_name, None)
     target_asset_name = args_cli.target_asset_name or DEFAULT_RL_TARGET_ASSET_NAME
     configure_task_target(env_cfg, target_asset_name)
     configure_termination_logging(env_cfg, args_cli.log_terminations)

@@ -47,8 +47,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--enable_camera_sensor",
-    action="store_true",
-    help="Keep the CameraSensor in the eval scene. Disabled by default to match training.",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Enable the three eval CameraSensors and periodic RGB-D capture. Enabled by default.",
 )
 parser.add_argument(
     "--skip_reset_scene_event",
@@ -89,6 +90,7 @@ parser.add_argument(
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+args_cli.enable_cameras = args_cli.enable_camera_sensor
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -101,12 +103,14 @@ from isaaclab_rl.sb3 import Sb3VecEnvWrapper
 
 from configs.RLcfg import AuboRLEnvCfg, DEFAULT_RL_TARGET_ASSET_NAME, configure_task_target
 from configs.asset import EE_BODY_NAME, ROBOT_ASSET_NAME
+from configs.camera_cfg import CAMERA_SENSOR_SCENE_NAMES
 from configs.collision_cfg import (
     ROBOT_CONTACT_FORCE_THRESHOLD,
     ROBOT_CONTACT_SENSOR_NAME,
     ROBOT_IGNORED_CONTACT_BODY_NAMES,
 )
 from tools.contact import AuboContactToolFns, PhysxContactPairPrinter, enable_physx_contact_reports
+from tools.rgbd_recorder import PeriodicRgbdRecorder
 
 
 TERMINATION_TERMS = (
@@ -460,7 +464,8 @@ def main() -> None:
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     if not args_cli.enable_camera_sensor:
-        env_cfg.scene.camera_cfg = None
+        for camera_name in CAMERA_SENSOR_SCENE_NAMES:
+            setattr(env_cfg.scene, camera_name, None)
     target_asset_name = args_cli.target_asset_name or DEFAULT_RL_TARGET_ASSET_NAME
     configure_task_target(env_cfg, target_asset_name)
     configure_termination_logging(env_cfg, args_cli.log_terminations)
@@ -496,6 +501,14 @@ def main() -> None:
         obs = env.reset()
         print("[Eval] SB3 VecEnv reset() finished; policy rollout is starting.", flush=True)
 
+        rgbd_recorder = None
+        if args_cli.enable_camera_sensor:
+            rgbd_recorder = PeriodicRgbdRecorder(
+                scene=isaac_env.scene,
+                camera_names=CAMERA_SENSOR_SCENE_NAMES,
+                script_name="eval",
+            )
+
         ep_returns = [0.0 for _ in range(args_cli.num_envs)]
         ep_lengths = [0 for _ in range(args_cli.num_envs)]
 
@@ -513,6 +526,8 @@ def main() -> None:
             ee_action_snapshot = ee_action_logger.snapshot(actions) if ee_action_logger is not None else None
             obs, rewards, dones, infos = env.step(actions)
             step += 1
+            if rgbd_recorder is not None:
+                rgbd_recorder.maybe_capture(step=step, sim_time_s=step * float(isaac_env.step_dt))
 
             if ee_action_logger is not None and ee_action_snapshot is not None:
                 ee_action_logger.print_step(step, ee_action_snapshot, dones)
