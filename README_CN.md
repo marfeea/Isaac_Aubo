@@ -55,6 +55,12 @@ Test/
 |       |-- train.py
 |       |-- play.py
 |       `-- cli_args.py
+|-- tasks/
+|   |-- common/              # 通用 SB3 运行时与任务输出路径
+|   |-- WithoutClaw/         # AUBO_E5.usd 法兰到达任务
+|   `-- WithClaw/            # AUBO_E5_Withclaw.usd TCP 停靠任务
+|-- docs/
+|   `-- RL任务双轨目录与TCP停靠改造方案.md
 |-- tools/
 |   |-- camera.py
 |   |-- contact.py
@@ -138,6 +144,25 @@ Test/
 - `camera.py`：相机位姿设置和 PNG 图像保存辅助函数。
 - `logic.py`：`configs/RLcfg.py` 使用的 AUBO 事件、奖励和终止函数。
 - `tool.py`：兼容性门面，从 `tools` 包重新导出常用工具类。
+
+### 项目内 AUBO 双任务链
+
+根目录 `tasks/` 下的两条 AUBO 任务链相互隔离：
+
+- `tasks/WithoutClaw/`：使用 `AUBO_E5.usd` 的旧版六关节无夹爪 Flange reach 任务。
+- `tasks/WithClaw/`：使用带夹爪八关节场景和三维 Flange IK 动作的 TCP 低速持续停靠任务；TCP 只参与观测、奖励、工作空间和终止判断。
+- `tasks/common/`：任务无关的 SB3 训练/验证与输出路径辅助逻辑。checkpoint 和 TensorBoard 日志分别写入 `checkpoints/<任务名>/sb3_aubo/` 与 `logs/<任务名>/sb3_aubo/`。
+
+使用 Isaac Lab Python 环境运行：
+
+```bash
+python tasks/WithoutClaw/train.py --headless
+python tasks/WithoutClaw/eval.py --headless --weight <checkpoint.zip>
+python tasks/WithClaw/train.py --headless
+python tasks/WithClaw/eval.py --headless --weight <checkpoint.zip>
+```
+
+WithClaw 五状态物理验收入口为 `tasks/WithClaw/tests/test_five_states.py`。TCP 标定风险及完整阶段验证记录见 `docs/RL任务双轨目录与TCP停靠改造方案.md`。
 
 ### `source/Test/`
 

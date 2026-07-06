@@ -55,6 +55,12 @@ Test/
 |       |-- train.py
 |       |-- play.py
 |       `-- cli_args.py
+|-- tasks/
+|   |-- common/              # shared SB3 runtime and task-scoped output paths
+|   |-- WithoutClaw/         # AUBO_E5.usd Flange reach task
+|   `-- WithClaw/            # AUBO_E5_Withclaw.usd TCP parking task
+|-- docs/
+|   `-- RL任务双轨目录与TCP停靠改造方案.md
 |-- tools/
 |   |-- camera.py
 |   |-- contact.py
@@ -138,6 +144,25 @@ This directory stores reusable project logic and helper modules that are not mea
 - `camera.py`: Camera pose and PNG capture helpers.
 - `logic.py`: AUBO event, reward, and termination functions used by `configs/RLcfg.py`.
 - `tool.py`: Compatibility facade that re-exports common utility classes from the `tools` package.
+
+### Project-local AUBO task tracks
+
+The runnable AUBO tasks under the root `tasks/` directory are isolated from each other:
+
+- `tasks/WithoutClaw/`: the legacy six-joint, no-gripper Flange reach task using `AUBO_E5.usd`.
+- `tasks/WithClaw/`: the eight-joint gripper scene and three-dimensional Flange IK action used for TCP low-speed parking. TCP is used for observations, rewards, workspace checks, and termination only.
+- `tasks/common/`: task-neutral SB3 training/evaluation and output-path helpers. Checkpoints and TensorBoard logs are written under `checkpoints/<task>/sb3_aubo/` and `logs/<task>/sb3_aubo/`.
+
+Run either task with the Isaac Lab Python environment:
+
+```bash
+python tasks/WithoutClaw/train.py --headless
+python tasks/WithoutClaw/eval.py --headless --weight <checkpoint.zip>
+python tasks/WithClaw/train.py --headless
+python tasks/WithClaw/eval.py --headless --weight <checkpoint.zip>
+```
+
+The WithClaw physical acceptance test is `tasks/WithClaw/tests/test_five_states.py`. The TCP calibration risk and the complete staged verification record are documented in `docs/RL任务双轨目录与TCP停靠改造方案.md`.
 
 ### `source/Test/`
 

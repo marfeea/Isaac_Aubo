@@ -1,4 +1,6 @@
-﻿import isaaclab.envs.mdp as mdp
+﻿from typing import NamedTuple
+
+import isaaclab.envs.mdp as mdp
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mdp.actions import ActionTerm, ActionTermCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -21,17 +23,16 @@ from configs.collision_cfg import (
     make_target_contact_sensor_cfg,
 )
 from configs.lula_cfg import AuboLulaIKControllerCfg
-from configs.place_cfg import WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS, WORKSTATION_INTERACTIVE_PLACEMENT_CFG
+from configs.place_cfg import WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS
 from configs.scene_cfg import TRAINING_ENV_SPACING, TRAINING_REPLICATE_PHYSICS, AuboTrainingSceneCfg
 from tools.ik import AuboTaskSpaceIKAction
 from tools.logic import (
     AuboRewardFns,
     AuboTerminationFns,
-    reset_planning_obstacle_pose,
 )
+from tools.randomization import reset_asset_to_discrete_pose
 from tools.scene import AuboToolFns
 
-RL_TARGET_CENTER = WORKSTATION_INTERACTIVE_PLACEMENT_CFG.base_pos
 DEFAULT_RL_TARGET_ASSET_NAME = WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS[0]["scene_key"]
 RL_SIM_DT = 1.0 / 120.0
 RL_DECIMATION = 30
@@ -45,16 +46,59 @@ RL_WORKSPACE = {
 }
 
 
-def make_reset_target_pose_event(target_asset_name: str = DEFAULT_RL_TARGET_ASSET_NAME) -> EventTerm:
+class TargetInitialStateCfg(NamedTuple):
+    """目标离散初始状态；pos 为 env 局部坐标，rot 为 wxyz 四元数。"""
+
+    name: str
+    pos: tuple[float, float, float]
+    rot: tuple[float, float, float, float]
+    preposition: tuple[float, float, float]
+
+
+TARGET_INITIAL_STATES = (
+    TargetInitialStateCfg(
+        "sample_bottle_state_01", (1.537, 0.203, 0.94), (0.0, 0.0, 0.0, 1.0), (1.537, 0.083, 0.94)
+    ),
+    TargetInitialStateCfg(
+        "sample_bottle_state_02",
+        (0.91167, 0.1753, 0.96789),
+        (0.70710678, 0.0, 0.0, -0.70710678),
+        (1.03167, 0.1753, 0.96789),
+    ),
+    TargetInitialStateCfg(
+        "sample_bottle_state_03",
+        (0.91167, 0.03036, 0.96676),
+        (0.70710678, 0.0, 0.0, -0.70710678),
+        (1.03167, 0.03036, 0.96676),
+    ),
+    TargetInitialStateCfg(
+        "sample_bottle_state_04",
+        (0.91235, -0.18557, 0.99091),
+        (0.70710678, 0.0, 0.0, -0.70710678),
+        (1.03235, -0.18557, 0.99091),
+    ),
+    TargetInitialStateCfg(
+        "sample_bottle_state_05",
+        (0.90264, -0.50461, 1.0915),
+        (1.0, 0.0, 0.0, 0.0),
+        (0.90264, -0.38461, 1.0915),
+    ),
+)
+
+
+def make_reset_target_pose_event(
+    target_asset_name: str = DEFAULT_RL_TARGET_ASSET_NAME,
+    fixed_state_name: str | None = None,
+) -> EventTerm:
     return EventTerm(
-        func=reset_planning_obstacle_pose,
+        func=reset_asset_to_discrete_pose,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg(target_asset_name),
-            "xy_radius": 0.45,
-            "z_radius": 0.18,
-            "z_range": (0.82, 1.06),
-            "center": RL_TARGET_CENTER,
+            "state_names": tuple(state.name for state in TARGET_INITIAL_STATES),
+            "positions": tuple(state.pos for state in TARGET_INITIAL_STATES),
+            "orientations": tuple(state.rot for state in TARGET_INITIAL_STATES),
+            "fixed_state_name": fixed_state_name,
         },
     )
 

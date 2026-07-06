@@ -43,6 +43,13 @@ AUBO_INITIAL_JOINT_POS = {
     joint_name: radians(angle_deg)
     for joint_name, angle_deg in AUBO_INITIAL_JOINT_POS_DEG.items()
 }
+# 指爪关节为直线关节，位置单位是米，不能参与上方的角度转换。
+AUBO_INITIAL_JOINT_POS.update(
+    {
+        "UpperFinger": 0.0115,
+        "DownFinger": 0.0,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -111,6 +118,12 @@ AUBO_CONFIG = ArticulationCfg(
                 "Joint5": 600.0,
                 "Flange": 600.0,
             },
+        ),
+        "gripper": ImplicitActuatorCfg(
+            joint_names_expr=["UpperFinger", "DownFinger"],
+            effort_limit_sim=50.0,
+            stiffness=1000.0,
+            damping=50.0,
         ),
     },
 )

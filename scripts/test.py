@@ -24,18 +24,6 @@ parser.add_argument("--ee_body_name", type=str, default=None, help="End-effector
 parser.add_argument("--list_all", action="store_true", help="Print all joint/body names without truncation.")
 parser.add_argument("--camera_name", type=str, default="camera_cfg", help="Scene camera key used for pose setup and reporting.")
 parser.add_argument(
-    "--contact_print_every",
-    type=int,
-    default=1,
-    help="Print ContactSensor force hits every N sim steps. Use 0 to disable.",
-)
-parser.add_argument(
-    "--contact_force_threshold",
-    type=float,
-    default=None,
-    help="Minimum ContactSensor force magnitude to print. Defaults to collision_cfg.py.",
-)
-parser.add_argument(
     "--apply_workstation_collision_config",
     action="store_true",
     help="Apply the workstation collision scan and temporary overrides from collision_cfg.py.",
@@ -62,20 +50,16 @@ from configs.asset import (
     AUBO_ROBOT_USD,
     EE_BODY_NAME,
     ROBOT_ASSET_NAME,
-    TARGET_ASSET_NAME,
 )
 from configs.camera_cfg import CAMERA_SENSOR_POSE_CFGS, CAMERA_SENSOR_SCENE_NAMES
 from configs.place_cfg import WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS
 from configs.RenderCfg import TEST_RENDER_CFG
 from configs.collision_cfg import (
-    ROBOT_CONTACT_FORCE_THRESHOLD,
-    ROBOT_CONTACT_SENSOR_NAME,
     apply_workstation_collision_config,
     disable_workstation_collision_prims,
 )
 from tools.camera import AuboCameraFns
 from tools.rgbd_recorder import PeriodicRgbdRecorder
-from tools.contact import AuboContactToolFns
 from configs.Testcfg import TestSceneCfg
 from configs.scene_cfg import TRAINING_ENV_SPACING, TRAINING_REPLICATE_PHYSICS
 
@@ -148,7 +132,6 @@ def _resolve_robot_entity(scene: InteractiveScene, ee_body_name: str) -> SceneEn
 def print_asset_report(scene: InteractiveScene, ee_body_name: str) -> SceneEntityCfg:
     """Print one-time asset and placement diagnostics."""
     robot = scene[ROBOT_ASSET_NAME]
-    # target = scene[TARGET_ASSET_NAME]
 
     joint_names = _get_named_list(robot, "joint_names")
     body_names = _get_named_list(robot, "body_names")
@@ -156,14 +139,12 @@ def print_asset_report(scene: InteractiveScene, ee_body_name: str) -> SceneEntit
     print("\n========== Isaac Asset Inspection ==========")
     print(f"[INFO] USD path           : {AUBO_ROBOT_USD}")
     print(f"[INFO] Robot scene key    : {ROBOT_ASSET_NAME}")
-    # print(f"[INFO] Target scene key   : {TARGET_ASSET_NAME}")
     print(f"[INFO] Requested EE body  : {ee_body_name}")
     print(f"[INFO] Num envs           : {scene.num_envs}")
     print(f"[INFO] Env origin[0]      : {_format_vec(scene.env_origins[0])}")
 
     print(f"[INFO] Robot root pos[0]  : {_format_vec(robot.data.root_pos_w[0, :3])}")
     print(f"[INFO] Robot root quat[0] : {_format_vec(robot.data.root_pose_w[0, 3:7])}")
-    # print(f"[INFO] Target pos[0]      : {_format_vec(target.data.root_pos_w[0, :3])}")
 
     _print_names("Joint names", joint_names, args_cli.list_all)
     _print_names("Body names", body_names, args_cli.list_all)
@@ -342,80 +323,10 @@ class ContactReportPrinter:
         return str(PhysicsSchemaTools.intToSdfPath(path_id))
 
 
-class ContactSensorPrinter:
-    """Print ContactSensor force magnitudes above a threshold."""
-
-    def __init__(
-        self,
-        scene: InteractiveScene,
-        sensor_name: str = ROBOT_CONTACT_SENSOR_NAME,
-        force_threshold: float = ROBOT_CONTACT_FORCE_THRESHOLD,
-        print_every: int = 1,
-    ):
-        self._scene = scene
-        self._sensor_name = sensor_name
-        self._force_threshold = float(force_threshold)
-        self._print_every = int(print_every)
-        self._missing_reported = False
-        self._empty_reported = False
-
-    def update(self, step: int) -> None:
-        if self._print_every <= 0 or step % self._print_every != 0:
-            return
-
-        try:
-            sensor = self._scene[self._sensor_name]
-        except Exception:
-            if not self._missing_reported:
-                self._missing_reported = True
-                print(f"[WARN] ContactSensor '{self._sensor_name}' is not registered in the scene.")
-            return
-
-        magnitude = AuboContactToolFns.extract_contact_magnitude(sensor)
-        if magnitude is None:
-            if not self._empty_reported:
-                self._empty_reported = True
-                print(f"[WARN] ContactSensor '{self._sensor_name}' has no readable force tensor yet.")
-            return
-
-        env_magnitude = self._reshape_contact_magnitude(magnitude)
-        if env_magnitude.numel() == 0:
-            return
-
-        max_force, flat_ids = torch.max(env_magnitude, dim=1)
-        hit_env_ids = torch.nonzero(max_force > self._force_threshold, as_tuple=False).squeeze(-1)
-        for env_id in hit_env_ids.detach().cpu().tolist():
-            print(
-                "[CONTACT_SENSOR] "
-                f"step={step} "
-                f"env={env_id} "
-                f"max_force={float(max_force[env_id].detach().cpu()):.6f} "
-                f"flat_index={int(flat_ids[env_id].detach().cpu())} "
-                f"shape={tuple(magnitude.shape)}"
-            )
-
-    def _reshape_contact_magnitude(self, magnitude: torch.Tensor) -> torch.Tensor:
-        if magnitude.ndim == 0:
-            return magnitude.reshape(1, 1)
-        if magnitude.shape[0] == self._scene.num_envs:
-            return magnitude.reshape(self._scene.num_envs, -1)
-        return magnitude.reshape(1, -1)
-
-
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, entity_cfg: SceneEntityCfg) -> None:
     robot = scene[ROBOT_ASSET_NAME]
-    # target = scene[TARGET_ASSET_NAME]
     sim_dt = sim.get_physics_dt()
     contact_printer = ContactReportPrinter(scene)
-    contact_sensor_printer = ContactSensorPrinter(
-        scene,
-        force_threshold=(
-            ROBOT_CONTACT_FORCE_THRESHOLD
-            if args_cli.contact_force_threshold is None
-            else args_cli.contact_force_threshold
-        ),
-        print_every=args_cli.contact_print_every,
-    )
 
     waypoints = make_joint_waypoints(robot.device, scene.num_envs)
     current_idx = 0
@@ -449,7 +360,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
 
         # 从仿真中读取最新状态，更新 scene 内各资产和传感器数据。
         scene.update(sim_dt)
-        contact_sensor_printer.update(total_steps + 1)
 
         # 按仿真时间周期保存所有相机、所有并行环境的 RGB-D 数据。
         sim_time = (total_steps + 1) * sim_dt
@@ -460,13 +370,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, ent
             ee_body_id = int(entity_cfg.body_ids[0])
             ee_pos_w = robot.data.body_pose_w[0, ee_body_id, :3]
             root_pos_w = robot.data.root_pos_w[0, :3]
-            # target_pos_w = target.data.root_pos_w[0, :3]
             print(
                 "[LIVE] "
                 f"step={total_steps} "
                 f"root={_format_vec(root_pos_w)} "
                 f"ee={_format_vec(ee_pos_w)} "
-                # f"target={_format_vec(target_pos_w)}"
             )
 
         step_in_cycle += 1

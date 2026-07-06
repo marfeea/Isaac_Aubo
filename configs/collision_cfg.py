@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from configs.asset import EE_BODY_NAME, ROBOT_ASSET_NAME
+from configs.asset import EE_BODY_NAME, ROBOT_ARTICULATION_PRIM_NAME, ROBOT_ASSET_NAME
 from configs.place_cfg import (
     ALL_COLLIDER_NAMES,
     DYNAMIC_COLLIDER_NAMES,
@@ -24,11 +24,15 @@ from isaaclab.sensors import ContactSensorCfg
 
 
 ROBOT_CONTACT_SENSOR_NAME = "robot_contact_sensor"
-ROBOT_CONTACT_SENSOR_PRIM_PATH = f"{{ENV_REGEX_NS}}/{ROBOT_ASSET_NAME}/.*"
+ROBOT_CONTACT_SENSOR_PRIM_PATH = (
+    f"{{ENV_REGEX_NS}}/{ROBOT_ASSET_NAME}/{ROBOT_ARTICULATION_PRIM_NAME}/.*"
+)
 ROBOT_CONTACT_FORCE_THRESHOLD = 50.0
 ROBOT_IGNORED_CONTACT_BODY_NAMES = ("Base_Link",)
 TARGET_CONTACT_SENSOR_NAME = "target_contact_sensor"
-TARGET_CONTACT_SENSOR_PRIM_PATH = f"{{ENV_REGEX_NS}}/{ROBOT_ASSET_NAME}/{EE_BODY_NAME}"
+TARGET_CONTACT_SENSOR_PRIM_PATH = (
+    f"{{ENV_REGEX_NS}}/{ROBOT_ASSET_NAME}/{ROBOT_ARTICULATION_PRIM_NAME}/{EE_BODY_NAME}"
+)
 TARGET_CONTACT_FORCE_THRESHOLD = 1.0e-6
 
 ROBOT_CONTACT_SENSOR_CFG = ContactSensorCfg(

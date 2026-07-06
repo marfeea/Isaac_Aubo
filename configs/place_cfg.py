@@ -110,6 +110,7 @@ class WorkstationInteractiveAssetPlacement(TypedDict):
     pos: Vec3
     rot: Quat
     scale: NotRequired[Vec3]
+    rigid_object: NotRequired[bool]
 
 
 @dataclass(frozen=True)
@@ -173,6 +174,7 @@ def _interactive_asset_placement(
     local_pos: Vec3,
     local_rot: Quat,
     scale: Vec3 | None = None,
+    rigid_object: bool = False,
 ) -> WorkstationInteractiveAssetPlacement:
     placement: WorkstationInteractiveAssetPlacement = {
         "name": name,
@@ -187,6 +189,8 @@ def _interactive_asset_placement(
     }
     if scale is not None:
         placement["scale"] = scale
+    if rigid_object:
+        placement["rigid_object"] = True
     return placement
 
 
@@ -334,6 +338,7 @@ WORKSTATION_INTERACTIVE_ASSET_PLACEMENTS: tuple[WorkstationInteractiveAssetPlace
         scene_key="ws_interactive_reagent_01_sample_bottle",
         local_pos=(0.048, 0.211, 0.0),
         local_rot=WORKSTATION_INTERACTIVE_PLACEMENT_CFG.local_rot_z_pos_90,
+        rigid_object=True,
     ),
     _interactive_asset_placement(
         name="Reagent_02_tray_bottle",
@@ -405,6 +410,7 @@ class WorkstationAssetSpec:
     init_pos: tuple[float, float, float] | None = None
     init_rot: tuple[float, float, float, float] | None = None
     scale: tuple[float, float, float] | None = None
+    rigid_object: bool = False
 
     @property
     def exists(self) -> bool:
@@ -443,7 +449,7 @@ class WorkstationTabletopLoadCfg:
             raise FileNotFoundError(f"Missing workstation split USD assets: {missing_names}")
 
         import isaaclab.sim as sim_utils
-        from isaaclab.assets import AssetBaseCfg
+        from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 
         scene_cfgs: dict[str, object] = {}
         xform_spawn = sim_utils.SpawnerCfg(func=sim_utils.clone(_spawn_empty_xform_prim))
@@ -467,10 +473,11 @@ class WorkstationTabletopLoadCfg:
             if spec.scale is not None:
                 usd_spawn_kwargs["scale"] = spec.scale
 
-            scene_cfgs[spec.scene_key] = AssetBaseCfg(
+            asset_cfg_type = RigidObjectCfg if spec.rigid_object else AssetBaseCfg
+            scene_cfgs[spec.scene_key] = asset_cfg_type(
                 prim_path=f"{self.prim_root}/{spec.kind.value}/{spec.name}",
                 spawn=sim_utils.UsdFileCfg(**usd_spawn_kwargs),
-                init_state=AssetBaseCfg.InitialStateCfg(
+                init_state=asset_cfg_type.InitialStateCfg(
                     pos=spec.init_pos or self.station_pos,
                     rot=spec.init_rot or self.station_rot,
                 ),
@@ -572,6 +579,7 @@ def _make_workstation_asset_specs(
                 init_pos=placement["pos"],
                 init_rot=placement["rot"],
                 scale=placement.get("scale"),
+                rigid_object=placement.get("rigid_object", False),
             )
         )
     return tuple(specs)

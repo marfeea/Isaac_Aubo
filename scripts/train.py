@@ -106,12 +106,7 @@ from configs.RLcfg import (
 )
 from configs.asset import ROBOT_ASSET_NAME
 from configs.camera_cfg import CAMERA_SENSOR_SCENE_NAMES
-from configs.collision_cfg import (
-    ROBOT_CONTACT_FORCE_THRESHOLD,
-    ROBOT_CONTACT_SENSOR_NAME,
-    ROBOT_IGNORED_CONTACT_BODY_NAMES,
-)
-from tools.contact import AuboContactToolFns, PhysxContactPairPrinter, enable_physx_contact_reports
+from tools.contact import PhysxContactPairPrinter, enable_physx_contact_reports
 
 
 PPO_HYPERPARAMS = {
@@ -357,148 +352,6 @@ class ContactReportStepCallback(BaseCallback):
         return True
 
 
-class ContactSensorCollisionCallback(BaseCallback):
-    """Print robot contact sensor hits when PhysX pair reports are unavailable."""
-
-    def __init__(
-        self,
-        isaac_env,
-        *,
-        sensor_name: str = ROBOT_CONTACT_SENSOR_NAME,
-        force_threshold: float = ROBOT_CONTACT_FORCE_THRESHOLD,
-        ignored_body_names: tuple[str, ...] = ROBOT_IGNORED_CONTACT_BODY_NAMES,
-    ):
-        super().__init__()
-        self.isaac_env = isaac_env
-        self.sensor_name = sensor_name
-        self.force_threshold = float(force_threshold)
-        self.ignored_body_names = tuple(ignored_body_names)
-        self._active_envs: set[int] = set()
-        self._missing_reported = False
-        self._empty_reported = False
-
-    def _on_step(self) -> bool:
-        try:
-            sensor = self.isaac_env.scene[self.sensor_name]
-        except Exception:
-            if not self._missing_reported:
-                self._missing_reported = True
-                print(f"[TRAIN][collision_sensor] sensor={self.sensor_name} missing", flush=True)
-            return True
-
-        magnitude = AuboContactToolFns.extract_contact_magnitude(sensor)
-        if magnitude is None:
-            if not self._empty_reported:
-                self._empty_reported = True
-                print(f"[TRAIN][collision_sensor] sensor={self.sensor_name} has no readable force tensor", flush=True)
-            return True
-
-        env_magnitude = self._reshape_contact_magnitude(magnitude, self.isaac_env.num_envs)
-        if env_magnitude.numel() == 0:
-            return True
-
-        max_force, flat_ids = torch.max(env_magnitude, dim=1)
-        current_envs = set(torch.nonzero(max_force > self.force_threshold, as_tuple=False).squeeze(-1).detach().cpu().tolist())
-        episode_lengths = getattr(self.isaac_env, "episode_length_buf", None)
-        reset_envs = self._reset_envs(episode_lengths, current_envs)
-        new_envs = (current_envs - self._active_envs) | reset_envs
-        self._active_envs = current_envs
-        body_names = self._body_names(sensor)
-        for env_id in sorted(new_envs):
-            flat_index = int(flat_ids[env_id].detach().cpu())
-            body_name = body_names[flat_index] if 0 <= flat_index < len(body_names) else f"flat_index={flat_index}"
-            illegal_body, illegal_force = self._max_non_ignored_body(
-                env_magnitude[env_id],
-                body_names,
-                self.ignored_body_names,
-            )
-            episode_length_text = self._episode_length_text(episode_lengths, env_id)
-            print(
-                "[TRAIN][collision_sensor] "
-                f"timestep={self.num_timesteps} "
-                f"env={env_id} "
-                f"robot_body={body_name} "
-                f"max_force={float(max_force[env_id].detach().cpu()):.6f} "
-                f"non_ignored_body={illegal_body} "
-                f"non_ignored_force={illegal_force:.6f} "
-                f"top_bodies={self._top_body_text(env_magnitude[env_id], body_names)} "
-                f"raw_shape={tuple(magnitude.shape)}"
-                f"{episode_length_text}",
-                flush=True,
-            )
-        return True
-
-    @staticmethod
-    def _reshape_contact_magnitude(magnitude: torch.Tensor, num_envs: int) -> torch.Tensor:
-        if magnitude.ndim == 0:
-            return magnitude.reshape(1, 1)
-        if magnitude.shape[0] == num_envs:
-            return magnitude.reshape(num_envs, -1)
-        if magnitude.shape[0] % num_envs == 0:
-            return magnitude.reshape(num_envs, -1)
-        return magnitude.reshape(1, -1)
-
-    @staticmethod
-    def _reset_envs(episode_lengths, current_envs: set[int]) -> set[int]:
-        if episode_lengths is None:
-            return set()
-        reset_envs: set[int] = set()
-        for env_id in current_envs:
-            if env_id >= int(episode_lengths.numel()):
-                continue
-            episode_length = int(episode_lengths[env_id].detach().cpu())
-            if episode_length <= 1:
-                reset_envs.add(env_id)
-        return reset_envs
-
-    @staticmethod
-    def _episode_length_text(episode_lengths, env_id: int) -> str:
-        if episode_lengths is None or env_id >= int(episode_lengths.numel()):
-            return ""
-        episode_length = int(episode_lengths[env_id].detach().cpu())
-        return f" episode_length={episode_length}"
-
-    @staticmethod
-    def _max_non_ignored_body(
-        env_magnitude: torch.Tensor,
-        body_names: list[str],
-        ignored_body_names: tuple[str, ...],
-    ) -> tuple[str, float]:
-        ignored = set(ignored_body_names)
-        best_name = "none"
-        best_force = 0.0
-        for index, value in enumerate(env_magnitude.detach().flatten().cpu().tolist()):
-            body_name = body_names[index] if 0 <= index < len(body_names) else f"flat_index={index}"
-            if body_name in ignored:
-                continue
-            force = float(value)
-            if force > best_force:
-                best_name = body_name
-                best_force = force
-        return best_name, best_force
-
-    @staticmethod
-    def _top_body_text(env_magnitude: torch.Tensor, body_names: list[str], count: int = 3) -> str:
-        values = env_magnitude.detach().flatten()
-        if values.numel() == 0:
-            return "none"
-        top_count = min(int(count), int(values.numel()))
-        forces, ids = torch.topk(values, k=top_count)
-        parts = []
-        for force, body_id in zip(forces.cpu().tolist(), ids.cpu().tolist()):
-            body_name = body_names[int(body_id)] if 0 <= int(body_id) < len(body_names) else f"flat_index={int(body_id)}"
-            parts.append(f"{body_name}:{float(force):.6f}")
-        return ",".join(parts)
-
-    @staticmethod
-    def _body_names(sensor) -> list[str]:
-        for owner in (sensor, getattr(sensor, "data", None)):
-            names = getattr(owner, "body_names", None)
-            if names:
-                return list(names)
-        return []
-
-
 class ViewerPumpCallback(BaseCallback):
     """Give the Isaac Sim GUI extra chances to process viewport input while SB3 is learning."""
 
@@ -575,7 +428,11 @@ def main():
         for camera_name in CAMERA_SENSOR_SCENE_NAMES:
             setattr(env_cfg.scene, camera_name, None)
     target_asset_name = args_cli.target_asset_name or DEFAULT_RL_TARGET_ASSET_NAME
-    configure_task_target(env_cfg, target_asset_name)
+    configure_task_target(
+        env_cfg,
+        target_asset_name,
+        randomize_target_pose=target_asset_name == DEFAULT_RL_TARGET_ASSET_NAME,
+    )
     configure_termination_logging(env_cfg, args_cli.log_terminations)
     if args_cli.skip_reset_scene_event:
         env_cfg.events.reset_scene = None
@@ -621,7 +478,6 @@ def main():
     ]
     if contact_printer is not None:
         callback_items.append(ContactReportStepCallback(contact_printer))
-        callback_items.append(ContactSensorCollisionCallback(isaac_env))
     if args_cli.interactive_viewer:
         if not getattr(args_cli, "headless", False):
             callback_items.append(
