@@ -8,8 +8,16 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
+from tasks.WithClaw.orientation import desired_flange_quaternion_wxyz
 from tasks.WithClaw.reset_state import gather_reset_values, select_state_ids, update_selected_state_names
-from tasks.WithClaw.task_cfg import DEFAULT_TARGET_ASSET_NAME, ROBOT_ASSET_NAME, TARGET_INITIAL_STATES, TargetInitialStateCfg
+from tasks.WithClaw.task_cfg import (
+    DEFAULT_TARGET_ASSET_NAME,
+    FLANGE_TO_TOOL_ROTATION_F,
+    ROBOT_ASSET_NAME,
+    TARGET_INITIAL_STATES,
+    TARGET_TO_TOOL_ROTATION_T,
+    TargetInitialStateCfg,
+)
 from tools.scene import AuboToolFns
 
 
@@ -64,6 +72,12 @@ def reset_target_to_named_state(
     )
     target = AuboToolFns.get_asset(env, asset_cfg)
     actual_target_position_w = target.data.root_pos_w[env_ids, :3].clone()
+    actual_target_rotation_w = target.data.root_pose_w[env_ids, 3:7].clone()
+    desired_flange_rotation_w = desired_flange_quaternion_wxyz(
+        actual_target_rotation_w,
+        TARGET_TO_TOOL_ROTATION_T,
+        FLANGE_TO_TOOL_ROTATION_F,
+    )
 
     _update_tensor_cache(env, "selected_state_ids", env_ids, state_ids, fill_value=-1)
     env.selected_state_names = update_selected_state_names(
@@ -81,8 +95,24 @@ def reset_target_to_named_state(
         actual_target_position_w,
         fill_value=float("nan"),
     )
+    _update_tensor_cache(
+        env,
+        "target_initial_rot_w",
+        env_ids,
+        actual_target_rotation_w,
+        fill_value=float("nan"),
+    )
+    _update_tensor_cache(
+        env,
+        "desired_flange_quat_w",
+        env_ids,
+        desired_flange_rotation_w,
+        fill_value=float("nan"),
+    )
     for name, fill_value in (
         ("_prev_tcp_preposition_dist", float("nan")),
+        ("_prev_tool_orientation_score", float("nan")),
+        ("_tool_orientation_reward_active", False),
         ("_tcp_parking_zone", False),
         ("_tcp_dwell_steps", 0),
         ("_tcp_parking_eval_step", -1),

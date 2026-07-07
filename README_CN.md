@@ -162,7 +162,7 @@ python tasks/WithClaw/train.py --headless
 python tasks/WithClaw/eval.py --headless --weight <checkpoint.zip>
 ```
 
-WithClaw 五状态物理验收入口为 `tasks/WithClaw/tests/test_five_states.py`。TCP 标定风险及完整阶段验证记录见 `docs/RL任务双轨目录与TCP停靠改造方案.md`。
+WithClaw 离散状态物理验收入口为 `tasks/WithClaw/tests/test_five_states.py`。TCP 标定风险及完整阶段验证记录见 `docs/RL任务双轨目录与TCP停靠改造方案.md`。
 
 ### `source/Test/`
 

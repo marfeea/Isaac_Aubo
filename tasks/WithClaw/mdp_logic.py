@@ -20,6 +20,7 @@ def update_parking_state(
     enter_distance: float,
     exit_distance: float,
     speed_threshold: float,
+    orientation_matched: torch.Tensor | None = None,
 ) -> ParkingState:
     """执行带迟滞的单步停车状态转移。"""
     if not enter_distance < exit_distance:
@@ -27,8 +28,10 @@ def update_parking_state(
     entered = previous_in_zone | (distance < float(enter_distance))
     in_zone = entered & ~(previous_in_zone & (distance > float(exit_distance)))
     low_speed = speed < float(speed_threshold)
+    if orientation_matched is None:
+        orientation_matched = torch.ones_like(low_speed)
     dwell_steps = torch.where(
-        in_zone & low_speed,
+        in_zone & low_speed & orientation_matched,
         previous_dwell_steps + 1,
         torch.zeros_like(previous_dwell_steps),
     )
@@ -46,6 +49,7 @@ def update_parking_state_once(
     enter_distance: float,
     exit_distance: float,
     speed_threshold: float,
+    orientation_matched: torch.Tensor | None = None,
 ) -> tuple[ParkingState, torch.Tensor]:
     """同一环境控制步内只提交一次状态转移。"""
     candidate = update_parking_state(
@@ -56,6 +60,7 @@ def update_parking_state_once(
         enter_distance=enter_distance,
         exit_distance=exit_distance,
         speed_threshold=speed_threshold,
+        orientation_matched=orientation_matched,
     )
     should_update = previous_eval_step != current_step
     state = ParkingState(

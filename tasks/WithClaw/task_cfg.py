@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import cos, radians, sqrt
 from pathlib import Path
 from typing import NamedTuple
 
@@ -17,6 +18,13 @@ RECORDED_TCP_TO_FLANGE_TRANSLATION = (0.0, 0.12, -0.102)
 DIRECT_REVERSE_TRANSLATION = (0.0, -0.12, 0.102)
 FLANGE_TO_TCP_TRANSLATION_F: tuple[float, float, float] = DIRECT_REVERSE_TRANSLATION
 
+# wxyz；工具 +Z 经该固定旋转映射到 Flange -X。
+FLANGE_TO_TOOL_ROTATION_F = (sqrt(0.5), 0.0, -sqrt(0.5), 0.0)
+# wxyz；工具 +Z 映射到目标 -Y，同时固定绕停靠轴的剩余自由度。
+TARGET_TO_TOOL_ROTATION_T = (sqrt(0.5), sqrt(0.5), 0.0, 0.0)
+TOOL_FORWARD_AXIS_T = (0.0, 0.0, 1.0)
+TARGET_DOCKING_AXIS_T = (0.0, -1.0, 0.0)
+
 RL_SIM_DT = 1.0 / 120.0
 RL_DECIMATION = 30
 RL_EPISODE_LENGTH_S = 40.0
@@ -33,21 +41,30 @@ TCP_PARKING_SPEED_THRESHOLD = 0.02
 TCP_PARKING_REQUIRED_STEPS = 3
 TCP_PROXIMITY_SIGMA = 0.20
 TCP_PARKING_SPEED_SIGMA = 0.02
+TOOL_ORIENTATION_REWARD_START_DISTANCE = 0.10
+TOOL_ORIENTATION_LOCK_DISTANCE = 0.03
+TOOL_ORIENTATION_SCORE_SIGMA_RAD = radians(30.0)
+TOOL_ORIENTATION_MATCH_THRESHOLD_RAD = radians(5.0)
+TOOL_ORIENTATION_MATCH_COS = cos(TOOL_ORIENTATION_MATCH_THRESHOLD_RAD)
 TARGET_MAX_DISPLACEMENT = 0.03
 TARGET_MAX_LINEAR_SPEED = 0.05
-ILLEGAL_CONTACT_FORCE_THRESHOLD = 1.0e-6
+ILLEGAL_CONTACT_FORCE_THRESHOLD = 50.0
 ROBOT_IGNORED_CONTACT_BODY_NAMES = ("Base_Link",)
 
 REWARD_WEIGHTS = {
     "tcp_progress": 80.0,
-    "tcp_proximity": 1.0,
-    "tcp_parking": 4.0,
-    "tcp_dwell": 8.0,
+    "tcp_proximity": 0.10,
+    "tcp_parking": 0.10,
+    "tool_axis_progress": 20.0,
+    "parking_success": 100.0,
     "step_penalty": -0.25,
     "action_l2": -0.025,
     "action_rate_l2": -0.10,
-    "out_of_workspace_penalty": -100.0,
-    "illegal_collision_penalty": -140.0,
+    "out_of_workspace_penalty": -160.0,
+    "illegal_collision_penalty": -200.0,
+    "target_displaced_penalty": -160.0,
+    "target_too_fast_penalty": -160.0,
+    "time_out_penalty": -40.0,
 }
 
 
@@ -84,11 +101,5 @@ TARGET_INITIAL_STATES = (
         (0.91235, -0.18557, 0.99091),
         (0.70710678, 0.0, 0.0, -0.70710678),
         (1.03235, -0.18557, 0.99091),
-    ),
-    TargetInitialStateCfg(
-        "sample_bottle_state_05",
-        (0.90264, -0.50461, 1.0915),
-        (1.0, 0.0, 0.0, 0.0),
-        (0.90264, -0.38461, 1.0915),
     ),
 )

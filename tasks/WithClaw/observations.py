@@ -9,7 +9,13 @@ from isaaclab.utils import configclass
 
 from configs.lula_cfg import AuboLulaIKControllerCfg
 from tasks.WithClaw.runtime import preposition_b, tcp_kinematics
-from tasks.WithClaw.task_cfg import DEFAULT_TARGET_ASSET_NAME, ROBOT_ASSET_NAME
+from tasks.WithClaw.task_cfg import (
+    DEFAULT_TARGET_ASSET_NAME,
+    FLANGE_TO_TCP_TRANSLATION_F,
+    ROBOT_ASSET_NAME,
+    TOOL_ORIENTATION_LOCK_DISTANCE,
+    TOOL_ORIENTATION_REWARD_START_DISTANCE,
+)
 from tools.ik import AuboTaskSpaceIKAction
 
 
@@ -54,11 +60,15 @@ class AuboTaskSpaceIKActionCfg(ActionTermCfg):
     action_dim: int = 3
     pos_scale: tuple[float, float, float] = (0.01, 0.01, 0.01)
     max_position_delta: float = 0.01
-    orientation_blend_start_distance: float = 0.40
-    orientation_lock_distance: float = 0.20
+    orientation_blend_start_distance: float = TOOL_ORIENTATION_REWARD_START_DISTANCE
+    orientation_lock_distance: float = TOOL_ORIENTATION_LOCK_DISTANCE
     orientation_blend_tolerance: float = 1.00
     max_orientation_step: float = 0.10
     normalize_quat: bool = True
+    orientation_goal_position_attr: str = "preposition_w"
+    orientation_target_quaternion_attr: str = "desired_flange_quat_w"
+    orientation_distance_offset_body: tuple[float, float, float] = FLANGE_TO_TCP_TRANSLATION_F
+    latch_orientation_after_activation: bool = True
     controller: AuboLulaIKControllerCfg = AuboLulaIKControllerCfg()
 
 

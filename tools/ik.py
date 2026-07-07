@@ -6,7 +6,7 @@ import torch
 
 from isaaclab.envs.mdp.actions import ActionTerm
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.utils.math import quat_from_matrix, subtract_frame_transforms
+from isaaclab.utils.math import quat_apply, quat_from_matrix, subtract_frame_transforms
 
 from tools.lula_ik import AuboLulaIKController
 from tools.scene import AuboToolFns
@@ -156,6 +156,7 @@ class AuboTaskSpaceIKAction(ActionTerm):
         position_delta.mul_(position_delta_scale)
 
         ee_pos_b = self._get_ee_pos_b()
+        orientation_reference_pos_b = self._get_orientation_reference_pos_b()
         root_pose_w = self.robot.data.root_pose_w
 
         self._action_start_ee_pos_b.copy_(ee_pos_b)
@@ -163,7 +164,16 @@ class AuboTaskSpaceIKAction(ActionTerm):
         self._step_diagnostics_valid[:] = True
 
         target_pos_b = ee_pos_b + self._processed_actions[:, 0:3]
-        goal_pos_w = AuboToolFns.get_root_pos_w(self._env, self.target_asset_name)
+        goal_position_attr = getattr(self.cfg, "orientation_goal_position_attr", None)
+        if goal_position_attr:
+            goal_pos_w = getattr(self._env, goal_position_attr, None)
+            if not isinstance(goal_pos_w, torch.Tensor) or goal_pos_w.shape != (self.num_envs, 3):
+                raise RuntimeError(
+                    f"姿态目标位置缓存 {goal_position_attr!r} 必须为 {(self.num_envs, 3)}，"
+                    f"实际为 {None if goal_pos_w is None else tuple(goal_pos_w.shape)}。"
+                )
+        else:
+            goal_pos_w = AuboToolFns.get_root_pos_w(self._env, self.target_asset_name)
         identity_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=goal_pos_w.dtype)
         identity_quat_w[:, 0] = 1.0
         goal_pos_b, _ = subtract_frame_transforms(
@@ -172,16 +182,22 @@ class AuboTaskSpaceIKAction(ActionTerm):
             goal_pos_w,
             identity_quat_w,
         )
-        self._ee_goal_distance[:] = torch.norm(goal_pos_b - ee_pos_b, dim=-1)
+        self._ee_goal_distance[:] = torch.norm(goal_pos_b - orientation_reference_pos_b, dim=-1)
         blend_range = self.cfg.orientation_blend_start_distance - self.cfg.orientation_lock_distance
         blend_t = torch.clamp(
             (self.cfg.orientation_blend_start_distance - self._ee_goal_distance) / blend_range,
             0.0,
             1.0,
         )
-        self._orientation_blend[:] = blend_t * blend_t * (3.0 - 2.0 * blend_t)
+        blend_candidate = blend_t * blend_t * (3.0 - 2.0 * blend_t)
 
         orientation_enabled = self._ee_goal_distance < self.cfg.orientation_blend_start_distance
+        latch_orientation = bool(getattr(self.cfg, "latch_orientation_after_activation", False))
+        if latch_orientation:
+            orientation_enabled = orientation_enabled | self._orientation_was_enabled
+            self._orientation_blend[:] = torch.maximum(self._orientation_blend, blend_candidate)
+        else:
+            self._orientation_blend[:] = blend_candidate
         newly_enabled_ids = torch.nonzero(
             orientation_enabled & ~self._orientation_was_enabled,
             as_tuple=False,
@@ -193,8 +209,23 @@ class AuboTaskSpaceIKAction(ActionTerm):
             self._blend_reference_quat_b[newly_enabled_ids] = reference_quat_b
             self._last_command_quat_b[newly_enabled_ids] = reference_quat_b
 
-        # 朝向只由实际末端位置决定，避免策略的单步位置命令直接引入姿态抖动。
-        facing_quat_b = self._compute_target_facing_quat_b(ee_pos_b, goal_pos_b)
+        target_quaternion_attr = getattr(self.cfg, "orientation_target_quaternion_attr", None)
+        if target_quaternion_attr:
+            target_quat_w = getattr(self._env, target_quaternion_attr, None)
+            if not isinstance(target_quat_w, torch.Tensor) or target_quat_w.shape != (self.num_envs, 4):
+                raise RuntimeError(
+                    f"姿态目标四元数缓存 {target_quaternion_attr!r} 必须为 {(self.num_envs, 4)}，"
+                    f"实际为 {None if target_quat_w is None else tuple(target_quat_w.shape)}。"
+                )
+            _, facing_quat_b = subtract_frame_transforms(
+                root_pose_w[:, 0:3],
+                root_pose_w[:, 3:7],
+                goal_pos_w,
+                target_quat_w,
+            )
+        else:
+            # 旧任务保持按当前位置朝向目标点的行为。
+            facing_quat_b = self._compute_target_facing_quat_b(ee_pos_b, goal_pos_b)
         desired_quat_b = self._quat_slerp(
             self._blend_reference_quat_b,
             facing_quat_b,
@@ -260,6 +291,25 @@ class AuboTaskSpaceIKAction(ActionTerm):
             ee_pose_w[:, 3:7],
         )
         return ee_pos_b
+
+    def _get_orientation_reference_pos_b(self) -> torch.Tensor:
+        offset_body = getattr(self.cfg, "orientation_distance_offset_body", None)
+        if offset_body is None:
+            return self._get_ee_pos_b()
+        body_pose_w = self.robot.data.body_pose_w[:, self.body_id]
+        offset = torch.as_tensor(offset_body, dtype=body_pose_w.dtype, device=body_pose_w.device)
+        if offset.shape != (3,):
+            raise ValueError(f"orientation_distance_offset_body 必须为 (3,)，实际为 {tuple(offset.shape)}。")
+        offset_w = quat_apply(body_pose_w[:, 3:7], offset.reshape(1, 3).expand(self.num_envs, 3))
+        reference_pos_w = body_pose_w[:, 0:3] + offset_w
+        root_pose_w = self.robot.data.root_pose_w
+        reference_pos_b, _ = subtract_frame_transforms(
+            root_pose_w[:, 0:3],
+            root_pose_w[:, 3:7],
+            reference_pos_w,
+            body_pose_w[:, 3:7],
+        )
+        return reference_pos_b
 
     @staticmethod
     def _normalize_quat(quat: torch.Tensor) -> torch.Tensor:

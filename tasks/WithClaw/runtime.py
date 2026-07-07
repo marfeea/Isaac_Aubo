@@ -3,14 +3,21 @@ from __future__ import annotations
 import torch
 
 from tasks.WithClaw.mdp_logic import ParkingState, update_parking_state_once
+from tasks.WithClaw.orientation import ToolAxisAlignment, tool_axis_alignment
 from tasks.WithClaw.task_cfg import (
+    DEFAULT_TARGET_ASSET_NAME,
     EE_BODY_NAME,
+    FLANGE_TO_TOOL_ROTATION_F,
     FLANGE_TO_TCP_TRANSLATION_F,
     ROBOT_ASSET_NAME,
     TCP_PARKING_ENTER_DISTANCE,
     TCP_PARKING_EXIT_DISTANCE,
     TCP_PARKING_SPEED_THRESHOLD,
     TARGET_INITIAL_STATES,
+    TARGET_DOCKING_AXIS_T,
+    TOOL_FORWARD_AXIS_T,
+    TOOL_ORIENTATION_MATCH_COS,
+    TOOL_ORIENTATION_SCORE_SIGMA_RAD,
 )
 from tasks.WithClaw.tcp import TcpKinematics, read_tcp_kinematics, rotate_vector_inverse_wxyz
 from tools.contact import AuboContactToolFns
@@ -43,6 +50,24 @@ def tcp_distance_and_speed(env) -> tuple[torch.Tensor, torch.Tensor]:
     return distance, speed
 
 
+def tool_orientation_alignment(env) -> ToolAxisAlignment:
+    target_rotation_w = getattr(env, "target_initial_rot_w", None)
+    if not isinstance(target_rotation_w, torch.Tensor) or target_rotation_w.shape != (env.num_envs, 4):
+        target = AuboToolFns.get_asset(env, DEFAULT_TARGET_ASSET_NAME)
+        target_rotation_w = target.data.root_pose_w[:, 3:7]
+    robot = AuboToolFns.get_asset(env, ROBOT_ASSET_NAME)
+    body_id = AuboToolFns.get_first_body_id(robot, EE_BODY_NAME)
+    flange_rotation_w = robot.data.body_pose_w[:, body_id, 3:7]
+    return tool_axis_alignment(
+        flange_rotation_w,
+        target_rotation_w,
+        FLANGE_TO_TOOL_ROTATION_F,
+        TOOL_FORWARD_AXIS_T,
+        TARGET_DOCKING_AXIS_T,
+        TOOL_ORIENTATION_SCORE_SIGMA_RAD,
+    )
+
+
 def parking_state(env) -> ParkingState:
     """每个控制步只推进一次状态，供多个奖励和终止项安全复用。"""
     distance, speed = tcp_distance_and_speed(env)
@@ -56,6 +81,7 @@ def parking_state(env) -> ParkingState:
     previous_dwell = getattr(env, "_tcp_dwell_steps", None)
     if not isinstance(previous_dwell, torch.Tensor) or previous_dwell.shape != step.shape:
         previous_dwell = torch.zeros_like(step, dtype=torch.long)
+    orientation_matched = tool_orientation_alignment(env).cosine > TOOL_ORIENTATION_MATCH_COS
 
     state, eval_step = update_parking_state_once(
         distance,
@@ -67,6 +93,7 @@ def parking_state(env) -> ParkingState:
         enter_distance=TCP_PARKING_ENTER_DISTANCE,
         exit_distance=TCP_PARKING_EXIT_DISTANCE,
         speed_threshold=TCP_PARKING_SPEED_THRESHOLD,
+        orientation_matched=orientation_matched,
     )
     env._tcp_parking_zone = state.in_zone
     env._tcp_dwell_steps = state.dwell_steps
